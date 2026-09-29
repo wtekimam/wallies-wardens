@@ -1,6 +1,6 @@
 id = "firstmate.pet"
 name = "Firstmate Pet"
-version = "0.3.0"
+version = "0.4.0"
 min_herdr_version = "0.9.0"
 description = "One Mochi per Firstmate worker: mood, hunger and a session trophy row"
 platforms = ["linux", "macos"]
@@ -21,5 +21,5 @@ id = "pet"
 title = "Firstmate Pet"
 placement = "popup"
 width = 84
-height = 24
+height = 34  # eight Mochis in two rows need the 29-row full panel
 command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/pet.py\""]

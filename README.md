@@ -2,7 +2,7 @@
 
 A Herdr pane that shows each Firstmate worker as Mochi, a small amber cat-eared critter.
 It opens by itself as a strip at the top of the Firstmate tab, and as a full popup on demand.
-Each Mochi shows its worker's mood, gets hungry while it waits on you,
+Each Mochi shows its worker's mood with a small idle animation, gets hungry while it waits on you,
 and leaves a gold cup in a trophy row after its PR lands.
 
 Plain python3 (stdlib only) with no dependencies. It makes no network calls and writes nothing.
@@ -20,7 +20,7 @@ herdr plugin action invoke firstmate.pet.pin     # the strip, same as at startup
 herdr plugin pane open --plugin firstmate.pet --entrypoint pet   # the full panel as a popup
 ```
 
-Without Herdr, run `python3 pet.py` in any 80-column terminal. Run `python3 pet.py --once` to print one frame and exit, or `--once --strip` for the strip's frame.
+Without Herdr, run `python3 pet.py` in any terminal at least 80 columns wide. Run `python3 pet.py --once` to print one frame and exit, or `--once --strip` for the strip's frame.
 
 ## The startup strip
 
@@ -32,7 +32,9 @@ A `[[startup]]` hook runs `pet.py --pin` once each time Herdr starts, after it r
    With no such pane, it uses the focused pane of the active tab.
    Herdr only splits right or down, so it then swaps the two panes (`herdr pane swap`) to put the pet on top.
 3. It opens without focus. A swap focuses a pane, so `--pin` puts focus back where it was: the same pane, or your other tab or workspace.
-   It then shrinks the strip to 13 rows, not counting pane borders.
+   It then sizes the strip to 13 rows, not counting pane borders, or 23 when the workers need a second row of Mochis.
+   After that the strip resizes itself: it grows when a second row appears and shrinks back when it goes (`herdr pane resize` on its own pane).
+   A strip you resize by hand is left alone until the number of rows changes again.
 
 To close the strip, press `q` in it. It comes back on the next Herdr start.
 To stop it for good, run `herdr plugin disable firstmate.pet` (`enable` to undo).
@@ -41,8 +43,11 @@ It can't live inside Herdr's agents sidebar.
 Herdr plugins can only open terminal panes (overlay, popup, split, tab or zoomed) and can't draw in the sidebar.
 A tiled strip on top of the Firstmate tab is the closest fit.
 
-**Layout:** when the pane is shorter than 19 rows, the pet draws the strip: the same Mochis as the full panel, each with its label, mood, hearts and bubble, and the trophies and keys on one line.
-It needs 13 rows. A taller pane gets the full panel. It redraws when the pane is resized.
+**Layout:** up to eight Mochis, as many across as the pane is wide (four at 80 columns, eight at 156), wrapping to a second row.
+Any more workers show as `+N more` in the title.
+When the pane is too short for the full panel (19 rows, or 29 with a second row of Mochis), the pet draws the strip:
+the same Mochis, each with its label, mood, hearts and bubble, and the trophies and keys on one line.
+The strip needs 13 rows, or 23 with a second row. It redraws when the pane is resized.
 
 ## Config
 
@@ -52,11 +57,16 @@ The Firstmate home is read from, in order:
 2. an `FM_HOME=/path` line in `$(herdr plugin config-dir firstmate.pet)/config`
 3. `~/Documents/firstmate`
 
+**Animation:** each Mochi moves a little, two frames per mood, about twice a second: busy and asleep breathe (asleep at half speed),
+calling jumps, training and party bounce, sick shivers. Neighbours move out of step.
+To keep them still, set `PET_ANIMATE=0`, either in the environment or as a line in the same config file.
+With eight animated Mochis the pane used about 0.4% of one CPU core, measured over 3 minutes (about 0.2% still).
+
 ## Keys
 
 | key | action |
 |---|---|
-| `1`-`4` | focus that worker's workspace and tab (`herdr workspace focus`, then `herdr tab focus`, using the ids in its meta). The popup closes; the strip stays |
+| `1`-`8` | focus that worker's workspace and tab (`herdr workspace focus`, then `herdr tab focus`, using the ids in its meta). The popup closes; the strip stays |
 | `r` | redraw |
 | `q` | close |
 | `Esc` | close the popup (the strip ignores it, so arrow keys don't close it) |
@@ -70,8 +80,12 @@ Every 3 seconds, for each `state/<id>.meta` in the Firstmate home, it reads:
 - the mtime of `state/<id>.turn-ended` and of `state/<id>.inbox/handled/`
 
 It never runs `bin/fm-*`, never reads panes, and never writes under the Firstmate home.
-Only `--pin` calls Herdr (`pane list`, `workspace list`, `pane process-info`, `plugin pane open`, `pane swap`, `pane layout`, `pane get`, `pane resize`, `pane close` for a restored shell, and `workspace focus`, `tab focus`, `pane neighbor` or `pane focus` to put focus back).
-The screen is redrawn only when the frame changes.
+Only `--pin` and the pinned strip call Herdr.
+`--pin` calls `pane list`, `workspace list`, `pane process-info`, `plugin pane open`, `pane swap`, and `pane close` for a restored shell.
+To put focus back it calls `workspace focus`, `tab focus`, `pane neighbor` or `pane focus`.
+To size the strip, `--pin` and the strip call `pane neighbor`, `pane layout`, `pane get` and `pane resize`.
+The strip does that only when its row count changes.
+Status files are read every 3 seconds whether or not the Mochis animate. Between reads, only the lines that changed are redrawn.
 
 ## Rules
 
@@ -90,11 +104,12 @@ The screen is redrawn only when the frame changes.
 
 **Look:** every worker is the Mochi from the approved design, in every layout. The test suite checks each mood, colour and accessory against it.
 
-**Colours and accessories:** each project gets one of eight colours from a stable hash of its name. Workers in the same project share the colour and are told apart by accessory, in this order: none, collar, scarf, cap, sunglasses, mask.
+**Colours and accessories:** each project gets one of eight colours from a stable hash of its name. Workers in the same project share the colour.
+Every worker wears an accessory, given in this order within its project: collar, scarf, cap, sunglasses, mask, then round again.
+A worker keeps its accessory, and a newcomer takes the first one free in its project.
+The collar is cyan, except on a teal Mochi, where it is red so it shows.
 
 **Trophies:** when the record of a PR-ready (or merged) worker disappears, its Mochi parties for 30 seconds. Then it leaves a gold cup labelled `project · task`. Cups live only in the pane's memory, so closing the pane or restarting the session clears them.
-
-Four creatures fit at once, in both layouts. Any more workers show as `+N more` in the title.
 
 ## Test
 

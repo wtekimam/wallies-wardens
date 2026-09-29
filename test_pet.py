@@ -81,22 +81,64 @@ class Panel(unittest.TestCase):
 
     def plain(self, lines): return [pet.TAG.sub("", l) for l in lines]
 
-    def test_four_shown_then_more(self):
-        for i in range(6): self.h.worker(f"demo-t{i}", lines=[f"working [at={NOW}]: go"], born=NOW - 600 + i)
+    def test_eight_shown_then_more(self):
+        for i in range(10): self.h.worker(f"demo-t{i}", lines=[f"working [at={NOW}]: go"], born=NOW - 600 + i)
         p = pet.Pet(self.h.root)
         out = self.plain(pet.render(p.poll(NOW), p.trophies))
         self.assertIn("+2 more", out[0])
-        self.assertIn("4 demo · t3", "\n".join(out))
-        self.assertNotIn("demo · t4", "\n".join(out))
+        self.assertIn("8 demo · t7", "\n".join(out))
+        self.assertNotIn("demo · t8", "\n".join(out))
         self.assertTrue(all(len(l) == pet.W for l in out), [len(l) for l in out])
 
-    def test_accessories_per_project_colour_shared(self):
-        a = self.h.worker("demo-one", lines=[f"working [at={NOW}]: go"], born=NOW - 900)
-        b = self.h.worker("demo-two", lines=[f"working [at={NOW}]: go"], born=NOW - 800)
+    def test_layout_one_to_nine(self):
+        for n in range(1, 10):  # 80 columns: four across, a second row from the fifth, never a third
+            self.assertEqual(pet.grid(n), (4, 1 if n <= 4 else 2, pet.W))
+            self.assertEqual(pet.strip_rows(n), pet.STRIP_ROWS if n <= 4 else pet.STRIP_ROWS + pet.CH)
+            ws = [dict(id=f"demo-t{i}", project="demo", mood="busy", bubble="", sub="", age="1m", hunger=5, hn="fed", acc="cap") for i in range(n)]
+            out = self.plain(pet.render_strip(ws, []))
+            self.assertEqual(len(out), pet.strip_rows(n))
+            self.assertTrue(all(len(l) == pet.W for l in out), (n, [len(l) for l in out]))
+            self.assertEqual(("+1 more" in out[0]), n == 9)
+        self.assertEqual(pet.grid(8, 160), (8, 1, 156))  # a wide pane fits all eight in one row
+        self.assertEqual(pet.grid(8, 120), (6, 2, 118))
+        self.assertEqual(pet.grid(3, 40), (4, 1, pet.W))  # narrower than 80 keeps the 80-column four
+        self.assertEqual(pet.layout_for(pet.FULL_ROWS, 8), "strip")  # two rows need a taller pane for the full panel
+        self.assertEqual(pet.layout_for(pet.FULL_ROWS + pet.CH, 8), "full")
+
+    def test_accessories_everyone_wears_one(self):
+        ids = [self.h.worker(f"demo-t{i}", lines=[f"working [at={NOW}]: go"], born=NOW - 900 + i) for i in range(7)]
         c = self.h.worker("other-one", project="other", lines=[f"working [at={NOW}]: go"])
-        ws = {w["id"]: w for w in pet.Pet(self.h.root).poll(NOW)}
-        self.assertEqual((ws[a]["acc"], ws[b]["acc"], ws[c]["acc"]), (None, "collar", None))
+        p = pet.Pet(self.h.root)
+        ws = {w["id"]: w for w in p.poll(NOW)}
+        self.assertEqual([ws[i]["acc"] for i in ids], ["collar", "scarf", "cap", "sunglasses", "mask", "collar", "scarf"])
+        self.assertEqual(ws[c]["acc"], "collar")  # a lone worker is not bare
+        os.remove(os.path.join(self.h.state, ids[1] + ".meta"))
+        self.h.worker("demo-new", lines=[f"working [at={NOW}]: go"], born=NOW)
+        ws = {w["id"]: w for w in p.poll(NOW + 3)}
+        self.assertEqual(ws["demo-new"]["acc"], "scarf")  # a newcomer takes the first free one; the others keep theirs
+        self.assertEqual(ws[ids[2]]["acc"], "cap")
         self.assertEqual(pet.colour_of("demo"), pet.colour_of("demo"))
+
+    def test_accessories_show_on_the_sprite(self):
+        for i in range(len(pet.PROJECT_PALS)):
+            bare = pet.creature("busy", None, i)
+            self.assertEqual(len({bare} | {pet.creature("busy", a, i) for a in pet.ACCS}), 1 + len(pet.ACCS))
+
+    def test_animation_frames(self):
+        for m in pet.MC:
+            for a in pet.ACCS:
+                f0, f1 = pet.creature(m, a, 6, 0), pet.creature(m, a, 6, 1)
+                self.assertNotEqual(f0, f1, (m, a))  # every mood moves
+                self.assertEqual(len(f1), 6)
+                self.assertTrue(all(pet.vis(l) == 12 for l in f1))  # same footprint: the cell never jitters
+        self.assertEqual(pet.creature("busy", "cap", 0), pet.creature("busy", "cap", 0, 0))  # frame 0 is the still
+        ws = [dict(id="demo-a", project="demo", mood="busy", bubble="", sub="", age="1m", hunger=5, hn="fed", acc="cap"),
+              dict(id="demo-b", project="demo", mood="asleep", bubble="", sub="", age="1m", hunger=5, hn="fed", acc="scarf")]
+        c = lambda t: [pet.cell(i, w, t)[:6] for i, w in enumerate(ws, 1)]
+        self.assertNotEqual(c(0)[0], c(1)[0])  # busy moves every tick
+        self.assertEqual(c(0)[1], c(1)[1])  # asleep breathes at half speed
+        self.assertNotEqual(c(1)[1], c(2)[1])
+        self.assertEqual(pet.cell(1, ws[0])[:6], [pet.center(x, pet.CW) for x in pet.creature("busy", "cap", pet.colour_of("demo"))])  # still: frame 0 for all
 
     def test_trophy_after_merge_only(self):
         merged = self.h.worker("demo-merge", lines=[f"done [at={NOW}]: PR https://x/pull/1"])
@@ -114,10 +156,10 @@ class Panel(unittest.TestCase):
         self.assertEqual(pet.Pet(self.h.root).trophies, [])  # a fresh process starts with no cups
 
     def test_sprites_match_the_agreed_mochi(self):
-        # crc32 of every mood x colour x accessory as drawn by the approved design (herdr-pet-tamagotchi-alts/build.py).
-        # A change here means the pet no longer looks like the Mochi the captain picked.
-        s = "\n".join("\n".join(pet.creature(m, a, i)) for m in pet.MC for i in range(8) for a in pet.ACCS)
-        self.assertEqual(zlib.crc32(s.encode()), 406192193)
+        # crc32 of every mood x colour x accessory (frame 0) as drawn by the approved design (herdr-pet-tamagotchi-alts/build.py),
+        # except the teal collar, red instead of cyan so it shows. A change here means the pet no longer looks like the Mochi the captain picked.
+        s = "\n".join("\n".join(pet.creature(m, a, i)) for m in pet.MC for i in range(8) for a in [None] + pet.ACCS)
+        self.assertEqual(zlib.crc32(s.encode()), 2099815327)
         self.assertTrue(all(len(pet.creature(m)) == 6 for m in pet.MC))
 
     def test_focus_cmds(self):
@@ -148,24 +190,27 @@ class Strip(unittest.TestCase):
         self.assertEqual(len(pet.draw([], [], 3)), 3)  # a tiny pane is clipped, never scrolled
 
     def test_strip_draws_mochi(self):
-        for i in range(6): self.h.worker(f"demo-t{i}", lines=[f"needs-decision [at={NOW}]: A or B"], born=NOW - 600 + i)
+        for i in range(10): self.h.worker(f"demo-t{i}", lines=[f"needs-decision [at={NOW}]: A or B"], born=NOW - 600 + i)
         p = pet.Pet(self.h.root)
         p.trophies = [("demo", f"cup{i}", "12:0" + str(i)) for i in range(9)]
         ws = p.poll(NOW)
-        lines = pet.draw(ws, p.trophies, pet.STRIP_ROWS)
+        self.assertEqual(len(pet.draw(ws, p.trophies, pet.STRIP_ROWS)), pet.STRIP_ROWS)  # a short pane clips, never scrolls
+        rows = pet.STRIP_ROWS + pet.CH  # eight Mochis: two rows of four
+        lines = pet.draw(ws, p.trophies, rows)
         out = self.plain(lines)
-        self.assertEqual(len(out), pet.STRIP_ROWS)
+        self.assertEqual(len(out), rows)
         self.assertTrue(all(len(l) == pet.W for l in out), [len(l) for l in out])
         self.assertIn("+2 more", out[0])
-        sprite = pet.creature("calling", ws[0]["acc"], pet.colour_of("demo"))
+        sprite = pet.creature("calling", ws[1]["acc"], pet.colour_of("demo"))
         self.assertIn(pet.center(sprite[2], pet.CW), lines[3])  # the real sprite, not a face
         self.assertIn("4 demo · t3", out[7])
         self.assertIn("calling", out[8])
         self.assertIn("♥", out[9])
         self.assertIn('"your call!"', out[10])
-        self.assertIn("demo · cup8 12:08", out[11])  # newest cup first
-        self.assertIn("earlier", out[11])
-        self.assertIn("q close", out[11])
+        self.assertIn("8 demo · t7", out[17])
+        self.assertIn("demo · cup8 12:08", out[21])  # newest cup first
+        self.assertIn("earlier", out[21])
+        self.assertIn("q close", out[21])
 
     def test_strip_empty(self):
         out = self.plain(pet.render_strip([], []))
@@ -210,7 +255,18 @@ class Pin(unittest.TestCase):
 
     def test_strip_amount(self):
         self.assertEqual(pet.strip_amount(20, 20, 8), 0.3)  # 40-row tab: 20 -> 8 rows
-        self.assertEqual(pet.strip_amount(6, 30, 8), 0)  # already short: leave it
+        self.assertEqual(pet.strip_amount(8, 32, 18), -0.25)  # a second row: 8 -> 18 rows
+        self.assertEqual(pet.strip_amount(8, 32, 8), 0)  # already right: leave it
+
+    def test_animate_setting(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "config"), "w") as f: f.write("PET_ANIMATE=off\n")
+            env = {k: v for k, v in os.environ.items() if k != "PET_ANIMATE"}
+            code = "import pet; print(pet.animate())"
+            run = lambda e: subprocess.run([sys.executable, "-c", code], env=e, cwd=os.path.dirname(pet.__file__), capture_output=True, text=True).stdout.strip()
+            self.assertEqual(run(env), "True")
+            self.assertEqual(run({**env, "HERDR_PLUGIN_CONFIG_DIR": d}), "False")
+            self.assertEqual(run({**env, "PET_ANIMATE": "0"}), "False")
 
     def test_refocus_after_swap(self):
         fm = self.pane("w1:p1", self.HOME)
