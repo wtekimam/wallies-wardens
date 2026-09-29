@@ -350,9 +350,7 @@ def creatures(shown, width=W, tick=None):  # up to eight Mochis, as many across 
 def render(workers, trophies, width=W, tick=None):
     shown, w = workers[:SHOWN], grid(len(workers), width)[2]
     sep = c(FRAME, " " + "─" * (w - 4))
-    keys = f"1-{len(shown)}" if len(shown) > 1 else "1"
-    rows = [""] + creatures(shown, width, tick) + [sep] + trophy_rows(trophies) + [sep, " " + (c("e0af68", keys) + c(DIM, " focus worker  ") if shown else "") +
-            c("e0af68", "r") + c(DIM, " redraw  ") + c("e0af68", "q") + c(DIM, " close")]
+    rows = [""] + creatures(shown, width, tick) + [sep] + trophy_rows(trophies) + [sep, " " + c("e0af68", "r") + c(DIM, " redraw  ") + c("e0af68", "q") + c(DIM, " close")]
     return panel(workers, rows, w)
 
 # ---- strip layout: the same Mochi rows, trophies and keys on one line, for the pinned strip ----
@@ -365,8 +363,7 @@ def layout_for(rows, n=0, width=W): return "full" if rows >= full_rows(n, width)
 
 def render_strip(workers, trophies, width=W, tick=None):
     shown, w = workers[:SHOWN], grid(len(workers), width)[2]
-    keys = (f"1-{len(shown)}" if len(shown) > 1 else "1") * bool(shown)
-    keys_txt = (c("e0af68", keys) + c(DIM, " focus  ") if keys else "") + c("e0af68", "q") + c(DIM, " close")  # r still redraws
+    keys_txt = c("e0af68", "q") + c(DIM, " close")
     room = w - 2 - vis(keys_txt) - 1 - len(" trophies ")
     cups = []
     for k, (p, t, tm) in enumerate(reversed(trophies), 1):  # newest first, as many as fit
@@ -502,13 +499,6 @@ def live(pet):
             key = os.read(fd, 1).decode(errors="ignore")
             if key in ("q", "\x03") or key == "\x1b" and not tiled: return  # Esc starts arrow keys too: only the popup takes it
             if key == "r": last = None
-            elif key.isdigit() and 1 <= int(key) <= min(SHOWN, len(workers)):
-                w = workers[int(key) - 1]
-                if w.get("gone"): continue
-                import subprocess
-                for cmd in focus_cmds(w, herdr):
-                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-                if not tiled: return  # the popup is modal: close it so the focused worker is visible
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         out.write("\x1b[0m\x1b[?25h\x1b[?1049l"); out.flush()

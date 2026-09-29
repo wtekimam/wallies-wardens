@@ -66,7 +66,6 @@ With eight animated Mochis the pane used about 0.4% of one CPU core, measured ov
 
 | key | action |
 |---|---|
-| `1`-`8` | focus that worker's workspace and tab (`herdr workspace focus`, then `herdr tab focus`, using the ids in its meta). The popup closes; the strip stays |
 | `r` | redraw |
 | `q` | close |
 | `Esc` | close the popup (the strip ignores it, so arrow keys don't close it) |
@@ -102,7 +101,7 @@ Status files are read every 3 seconds whether or not the Mochis animate. Between
 | asleep | busy or training with no status or turn activity for 30 min | silent 45m |
 | party | `done` line says merged/landed, or the record of a PR-ready worker is removed | merged! |
 
-**Main session:** one extra Mochi, always first (key `1`), labelled `main · firstmate`. It shows only while Herdr has a pane whose cwd is the Firstmate home; with none (or without Herdr, or `--once` outside it) there is no main Mochi and no error. It counts toward the eight.
+**Main session:** one extra Mochi, always first, labelled `main · firstmate`. It shows only while Herdr has a pane whose cwd is the Firstmate home; with none (or without Herdr, or `--once` outside it) there is no main Mochi and no error. It counts toward the eight.
 Its mood comes from that pane's `agent_status`, not from status files:
 
 | `agent_status` | mood | text under the label |
@@ -111,7 +110,7 @@ Its mood comes from that pane's `agent_status`, not from status files:
 | `blocked` | calling | `"needs you!"` |
 | `idle` (also `done`, `unknown`) | asleep | main session |
 
-It has no hearts (the line reads `main session`), no accessory rotation (always the collar), and no focus cost: `1` focuses its workspace and tab like any worker.
+It has no hearts (the line reads `main session`), no accessory rotation (always the collar).
 
 **Hunger:** five solid hearts (●, hollow ○ when lost). They drain by one every 10 minutes, and only while the worker is calling (waiting on you). A new handled inbox message fills them again. That covers your prompts and Firstmate's, including while you are away. A worker that stops calling is also full again. Nothing else drains hunger.
 
