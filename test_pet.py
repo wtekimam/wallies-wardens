@@ -1,5 +1,5 @@
 """python3 -m unittest test_pet  -- fixture Firstmate-style state dirs, no live home touched."""
-import os, subprocess, sys, tempfile, time, unittest
+import os, subprocess, sys, tempfile, time, unittest, zlib
 import pet
 
 NOW = 1790000000
@@ -31,24 +31,21 @@ class Moods(unittest.TestCase):
     def setUp(self): self.h = Home()
     def tearDown(self): self.h.tmp.cleanup()
 
-    def check(self, lines, mood, stage=None, bubble="", **kw):
+    def check(self, lines, mood, bubble="", **kw):
         w = self.h.read(self.h.worker("demo-task", lines=lines, **kw))
         self.assertEqual(w["mood"], mood)
         self.assertEqual(w["bubble"], bubble)
-        if stage: self.assertEqual(w["stage"], stage)
         return w
 
-    def test_egg_before_first_status(self): self.check([], "busy", "egg")
-    def test_busy_baby(self): self.check([f"working [at={NOW}]: building the thing"], "busy", "baby")
-    def test_training_grown(self): self.check([f"working [at={NOW}]: running no-mistakes validation"], "training", "grown")
-    def test_paused_on_validation(self): self.check([f"paused [at={NOW}]: no-mistakes run in progress"], "training", "grown")
-    def test_grown_stays_after_validation(self):
-        self.check([f"working [at={NOW}]: no-mistakes validation", f"working [at={NOW}]: fixing review"], "busy", "grown")
-    def test_decision_calls(self): self.check([f"needs-decision [at={NOW}]: A or B"], "calling", "grown", "your call!")
+    def test_busy_before_first_status(self): self.check([], "busy")
+    def test_busy(self): self.check([f"working [at={NOW}]: building the thing"], "busy")
+    def test_training(self): self.check([f"working [at={NOW}]: running no-mistakes validation"], "training")
+    def test_paused_on_validation(self): self.check([f"paused [at={NOW}]: no-mistakes run in progress"], "training")
+    def test_decision_calls(self): self.check([f"needs-decision [at={NOW}]: A or B"], "calling", "your call!")
     def test_resolved_decision_back_to_busy(self):
         self.check([f"needs-decision [key=k] [at={NOW}]: A or B", f"resolved [key=k] [at={NOW}]: A"], "busy")
-    def test_pr_ready(self): self.check([f"done [at={NOW}]: PR https://x/pull/1"], "calling", "grown", "PR ready!")
-    def test_report_ready(self): self.check([f"done [at={NOW}]: report written"], "calling", "grown", "report ready!", kind="scout")
+    def test_pr_ready(self): self.check([f"done [at={NOW}]: PR https://x/pull/1"], "calling", "PR ready!")
+    def test_report_ready(self): self.check([f"done [at={NOW}]: report written"], "calling", "report ready!", kind="scout")
     def test_blocked_sick(self): self.check([f"blocked [at={NOW}]: CI red"], "sick")
     def test_failed_sick(self): self.check([f"failed [at={NOW}]: gave up"], "sick")
     def test_merged_party(self): self.check([f"done [at={NOW}]: merged into main"], "party")
@@ -116,11 +113,12 @@ class Panel(unittest.TestCase):
         self.assertIn("demo · merge", "\n".join(self.plain(pet.render(ws, p.trophies))))
         self.assertEqual(pet.Pet(self.h.root).trophies, [])  # a fresh process starts with no cups
 
-    def test_every_sprite_renders(self):
-        for stage in ("egg", "baby", "grown"):
-            for mood in pet.MC:
-                for acc in pet.ACCS:
-                    self.assertEqual(len(pet.creature(mood, stage, acc, 2)), 6)
+    def test_sprites_match_the_agreed_mochi(self):
+        # crc32 of every mood x colour x accessory as drawn by the approved design (herdr-pet-tamagotchi-alts/build.py).
+        # A change here means the pet no longer looks like the Mochi the captain picked.
+        s = "\n".join("\n".join(pet.creature(m, a, i)) for m in pet.MC for i in range(8) for a in pet.ACCS)
+        self.assertEqual(zlib.crc32(s.encode()), 406192193)
+        self.assertTrue(all(len(pet.creature(m)) == 6 for m in pet.MC))
 
     def test_focus_cmds(self):
         self.assertEqual(pet.focus_cmds(dict(ws="w1", tab="w1:t2"), "h"), [["h", "workspace", "focus", "w1"], ["h", "tab", "focus", "w1:t2"]])
@@ -144,33 +142,36 @@ class Strip(unittest.TestCase):
 
     def test_layout_follows_height(self):
         self.assertEqual(pet.layout_for(pet.FULL_ROWS), "full")
-        self.assertEqual(pet.layout_for(pet.FULL_ROWS - 1), "compact")
-        self.assertEqual(pet.layout_for(8), "compact")
+        self.assertEqual(pet.layout_for(pet.FULL_ROWS - 1), "strip")
         self.assertEqual(len(pet.draw([], [], 40)), pet.FULL_ROWS)  # the full panel is exactly FULL_ROWS tall
+        self.assertEqual(len(pet.draw([], [], pet.STRIP_ROWS)), pet.STRIP_ROWS)  # and the strip STRIP_ROWS
         self.assertEqual(len(pet.draw([], [], 3)), 3)  # a tiny pane is clipped, never scrolled
 
-    def test_compact_fits_a_strip(self):
+    def test_strip_draws_mochi(self):
         for i in range(6): self.h.worker(f"demo-t{i}", lines=[f"needs-decision [at={NOW}]: A or B"], born=NOW - 600 + i)
         p = pet.Pet(self.h.root)
         p.trophies = [("demo", f"cup{i}", "12:0" + str(i)) for i in range(9)]
-        out = self.plain(pet.draw(p.poll(NOW), p.trophies, 8))
-        self.assertEqual(len(out), 7)  # top, four workers, trophy line, bottom
+        ws = p.poll(NOW)
+        lines = pet.draw(ws, p.trophies, pet.STRIP_ROWS)
+        out = self.plain(lines)
+        self.assertEqual(len(out), pet.STRIP_ROWS)
         self.assertTrue(all(len(l) == pet.W for l in out), [len(l) for l in out])
         self.assertIn("+2 more", out[0])
-        self.assertIn("4 (°o°) demo · t3", out[4])
-        self.assertIn('"your call!"', out[1])
-        self.assertIn("demo · cup8 12:08", out[5])  # newest cup first
-        self.assertIn("earlier", out[5])
-        self.assertIn("q close", out[5])
+        sprite = pet.creature("calling", ws[0]["acc"], pet.colour_of("demo"))
+        self.assertIn(pet.center(sprite[2], pet.CW), lines[3])  # the real sprite, not a face
+        self.assertIn("4 demo · t3", out[7])
+        self.assertIn("calling", out[8])
+        self.assertIn("♥", out[9])
+        self.assertIn('"your call!"', out[10])
+        self.assertIn("demo · cup8 12:08", out[11])  # newest cup first
+        self.assertIn("earlier", out[11])
+        self.assertIn("q close", out[11])
 
-    def test_compact_empty_and_egg(self):
-        out = self.plain(pet.render_compact([], []))
-        self.assertEqual(len(out), 4)
-        self.assertIn("no workers aboard", out[1])
-        self.assertIn("none yet", out[2])
-        self.h.worker("demo-new")
-        out = self.plain(pet.render_compact(pet.Pet(self.h.root).poll(NOW), []))
-        self.assertIn("1 ( · ) demo · new", out[1])
+    def test_strip_empty(self):
+        out = self.plain(pet.render_strip([], []))
+        self.assertEqual(len(out), pet.STRIP_ROWS)
+        self.assertIn("no workers aboard", "\n".join(out))
+        self.assertIn("none yet", out[-2])
         self.assertTrue(all(len(l) == pet.W for l in out))
 
 class Pin(unittest.TestCase):
@@ -208,8 +209,18 @@ class Pin(unittest.TestCase):
         self.assertFalse(pet.running_pet({}))
 
     def test_strip_amount(self):
-        self.assertEqual(pet.strip_amount(20, 20), 0.3)  # 40-row tab: 20 -> 8 rows
-        self.assertEqual(pet.strip_amount(6, 30), 0)  # already short: leave it
+        self.assertEqual(pet.strip_amount(20, 20, 8), 0.3)  # 40-row tab: 20 -> 8 rows
+        self.assertEqual(pet.strip_amount(6, 30, 8), 0)  # already short: leave it
+
+    def test_refocus_after_swap(self):
+        fm = self.pane("w1:p1", self.HOME)
+        nb = lambda d: {"right": "w1:p2"}.get(d)
+        self.assertEqual(pet.refocus_cmds(None, fm, nb), [])
+        self.assertEqual(pet.refocus_cmds(fm, fm, nb), [])  # focus was on the Firstmate pane: swap keeps it there
+        other_tab = dict(pane_id="w2:p5", tab_id="w2:t3", workspace_id="w2")
+        self.assertEqual(pet.refocus_cmds(other_tab, fm, nb), [["workspace", "focus", "w2"], ["tab", "focus", "w2:t3"]])
+        beside = dict(pane_id="w1:p2", tab_id="w1:t1", workspace_id="w1")
+        self.assertEqual(pet.refocus_cmds(beside, fm, nb), [["pane", "focus", "--pane", "w1:p1", "--direction", "right"]])
 
 if __name__ == "__main__":
     unittest.main()

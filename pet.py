@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""herdr pet: one Mochi per Firstmate worker, in a Herdr pane (a strip under the Firstmate tab, or a popup).
+"""herdr pet: one Mochi per Firstmate worker, in a Herdr pane (a strip on top of the Firstmate tab, or a popup).
 
 Read-only view of a Firstmate home. Per worker it reads only state/<id>.meta, the tail of
 state/<id>.status, the mtime of state/<id>.turn-ended and the mtime of state/<id>.inbox/handled/.
 It never writes under the Firstmate home and never runs Firstmate scripts.
 
   python3 pet.py            live pane: poll every 3s, redraw only when the frame changes
-  python3 pet.py --once     print one frame to stdout and exit (--once --compact: the short-strip frame)
-  python3 pet.py --pin      open the pet as a short strip in the Firstmate tab unless one is open (startup hook)
+  python3 pet.py --once     print one frame to stdout and exit (--once --strip: the strip's frame)
+  python3 pet.py --pin      open the pet as a strip on top of the Firstmate tab unless one is open (startup hook)
 """
 import os, re, sys, time, zlib
 
@@ -58,16 +58,14 @@ def G(rows):
     assert len(rows) == 12 and all(len(r) == 12 for r in rows), rows
     return [list(r) for r in rows]
 
-def put(g, edits, over=False, body=False):  # over: only empty cells (props never clobber the creature); body: only creature cells
+def put(g, edits, over=False):  # over: only paint empty cells (props never clobber the creature)
     for r, col, s in edits:
         for i, ch in enumerate(s):
-            if ch == "_" or not (0 <= col + i < 12 and 0 <= r < 12): continue
-            empty = g[r][col + i] == "."
-            if not (over and not empty or body and empty): g[r][col + i] = ch
+            if ch != "_" and 0 <= col + i < 12 and 0 <= r < 12 and (not over or g[r][col + i] == "."): g[r][col + i] = ch
     return g
 
 def up(g):  # hop: whole sprite one pixel up
-    return g[1:] + [["."] * 12] if all(x == "." for x in g[0]) else g
+    return g[1:] + [["."] * 12]
 
 def mix(h, h2, t):
     a, b = [int(h[i:i+2], 16) for i in (1, 3, 5)], [int(h2[i:i+2], 16) for i in (1, 3, 5)]
@@ -77,20 +75,10 @@ PROPS = dict(E="#2b2118", N="#2b2118", M="#5a2230", T="#f7768e", R="#f7768e", Y=
              P="#ff9ec7", S="#8b93b0", s="#3b4261", K="#cfe8ff", k="#8fb4d8", Z="#9db1ff", z="#7d8fd0", D="#c99a62", O="#d4e157", W="#f4f4f8")
 TINT = "BdWAb"  # sick/asleep tint touches only the creature's own colours
 
-# er = eye row, ec = eye columns, tall = 2px eyes, mr = mouth row, hb = headband row, ar = raised-arm row,
-# ax = arm columns, dy / cap_dy = accessory row shift; a baby's accessories are clipped to its smaller body
-STAGES = dict(
- grown=dict(grid=["............", "..A......A..", "..AP....PA..", "..ABBBBBBA..", "..BBBBBBBB..", "..BEBBBBEB..",
-                  ".wBBBPPBBBw.", "..BBBMMBBB..", "...BBBBBB.b.", "...BWWWWB.b.", "...BWWWWBbb.", "...BB..BB..."],
-            er=5, ec=(3, 8), tall=False, mr=7, hb=4, ar=6, ax=(1, 10), dy=0, cap_dy=0),
- # baby: 6px head with big 2px eyes on a tiny body, no tail
- baby=dict(grid=["............", "............", "............", "............", "...A....A...", "...ABBBBA...",
-                 "...BEBBEB...", "..wBEPPEBw..", "...BBMMBB...", "....BBBB....", "....BWWB....", "....B..B...."],
-           er=6, ec=(4, 7), tall=True, mr=8, hb=5, ar=9, ax=(3, 8), dy=1, cap_dy=2),
- # egg: amber shell in the project colour, cream spots, Mochi's ear tips poking out
- egg=dict(grid=["............", "............", "............", "....A..A....", "....BBBB....", "...BBWBBB...",
-                "..BBBBBBWB..", "..BWBBBBBB..", "..BBBBBWBB..", "...BBBBBB...", "....BBBB....", "............"]),
-)
+# The agreed Mochi (design build.py). ER = eye row, CL/CR = eye columns, MR = mouth row, HB = headband row
+MOCHI = ["............", "..A......A..", "..AP....PA..", "..ABBBBBBA..", "..BBBBBBBB..", "..BEBBBBEB..",
+         ".wBBBPPBBBw.", "..BBBMMBBB..", "...BBBBBB.b.", "...BWWWWB.b.", "...BWWWWBbb.", "...BB..BB..."]
+ER, (CL, CR), MR, HB = 5, (3, 8), 7, 4
 
 PROJECT_PALS = [  # eight project colours: ginger, grey, charcoal (yellow eyes), cream, brown, lilac, teal, rose
  dict(B="#ffb454", d="#e0902e", W="#fff1d6", A="#e0902e", w="#c0caf5", b="#e0902e"),
@@ -115,51 +103,35 @@ CONFETTI = [(0, 1, "P"), (0, 4, "Y"), (1, 2, "C"), (0, 8, "G"), (2, 0, "Y"), (0,
 def shade(g, pal):  # underside shadow: body pixels with empty space below get the darker 'd'
     return [[("d" if ch == "B" and (r == 11 or g[r + 1][i] == ".") else ch) for i, ch in enumerate(row)] for r, row in enumerate(g)]
 
-def creature(mood, stage="grown", acc=None, colour=0):
-    st, pal = STAGES[stage], {**PROPS, **PROJECT_PALS[colour]}
-    g = G(st["grid"])
-    if stage == "egg":  # an egg has no face: it only dozes, sickens, calls or parties
-        if mood == "asleep":
-            put(g, [(0, 9, "ZZZ"), (1, 10, "Z"), (2, 9, "ZZZ")], over=True); pal = mood_pal(pal, "#7080c0", 0.55)
-        elif mood == "sick": pal = mood_pal(pal, "#9ece6a", 0.45)
-        elif mood == "calling": put(g, [(0, 11, "R"), (1, 11, "R"), (3, 11, "R")], over=True)
-        elif mood == "party": g = up(g); put(g, CONFETTI, over=True)
-        return render_px(shade(g, pal), pal)
-    er, (cl, cr), tall, mr, ar, (a0, a1) = st["er"], st["ec"], st["tall"], st["mr"], st["ar"], st["ax"]
-    for r, col, s in ACC.get(acc, []):
-        cap = acc == "cap"
-        put(g, [(r + st["cap_dy" if cap else "dy"], col, s)], body=stage == "baby" and not cap)
+def creature(mood, acc=None, colour=0):
+    pal, g = {**PROPS, **PROJECT_PALS[colour]}, G(MOCHI)
+    for r, col, s in ACC.get(acc, []): put(g, [(r, col, s)])
     def eyes(kind):
-        if kind == "focus": put(g, [(er - 1, cl, "NN"), (er - 1, cr - 1, "NN")])
-        elif kind == "wide": put(g, [(er - 1 if tall else er + 1, cl, "E"), (er - 1 if tall else er + 1, cr, "E")])
+        if kind == "focus": put(g, [(ER - 1, CL, "NN"), (ER - 1, CR - 1, "NN")])
+        elif kind == "wide": put(g, [(ER + 1, CL, "E"), (ER + 1, CR, "E")])
         elif kind == "droop":
-            for x in (cl, cr):
-                g[er][x] = "B"
-                if not tall: g[er + 1][x] = "E"
+            for x in (CL, CR): g[ER][x], g[ER + 1][x] = "B", "E"
         elif kind == "dash":  # closed eyes: asleep and party
-            for x in (cl, cr):
-                g[er][x] = "B"
-                if tall: g[er + 1][x] = "B"
-            rr = er + 1 if tall else er
-            put(g, [(rr, cl - 1, "EE"), (rr, cr, "EE")])
+            for x in (CL, CR): g[ER][x] = "B"
+            put(g, [(ER, CL - 1, "EE"), (ER, CR, "EE")])
     def mouth(kind):
-        if kind == "frown": put(g, [(mr + 1, 4, "M"), (mr + 1, 7, "M")])
-        elif kind == "open": put(g, [(mr, 5, "MM"), (mr + 1, 5, "TT")])
-    def arms_up(): put(g, [(ar, a0, "B"), (ar - 1, a0 - 1, "B"), (ar, a1, "B"), (ar - 1, a1 + 1, "B")])
+        if kind == "frown": put(g, [(MR + 1, 4, "M"), (MR + 1, 7, "M")])
+        elif kind == "open": put(g, [(MR, 5, "MM"), (MR + 1, 5, "TT")])
+    def arms_up(): put(g, [(6, 1, "B"), (5, 0, "B"), (6, 10, "B"), (5, 11, "B")])
     if mood == "busy":  # focused brows, swinging a hammer, sparks
         eyes("focus")
         put(g, [(3, 10, "SS"), (4, 10, "SS")] + [(r, 11, "D") for r in (5, 6, 7, 8)] + [(2, 10, "Y"), (1, 11, "Y"), (3, 9, "Y")], over=True)
     elif mood == "training":  # sweatband, hop, speed lines, ground shadow
-        hb = st["hb"]
-        put(g, [(hb, cl - 1, "R" * (cr - cl + 3)), (hb, cr + 2, "R"), (hb + 1, cr + 3, "R"), (er, cl - 2, "C"), (er + 1, cl - 2, "C")])
+        put(g, [(HB, 2, "RRRRRRRR"), (HB, 10, "R"), (HB + 1, 11, "R"), (ER, 1, "C"), (ER + 1, 1, "C")])
         g = up(g)
         put(g, [(11, 3, "ssssss"), (5, 0, "S"), (7, 0, "S"), (9, 0, "S")], over=True)
     elif mood == "calling":  # arms up, wide eyes, mouth open, "!" mark
         eyes("wide"); mouth("open"); arms_up()
         put(g, [(0, 11, "R"), (1, 11, "R"), (3, 11, "R")], over=True)
-    elif mood == "sick":  # droopy eyes, frown, thermometer, sweat, green tint
+    elif mood == "sick":  # droopy eyes, frown, a paw holding the thermometer, sweat, green tint
         eyes("droop"); mouth("frown")
-        put(g, [(4, 11, "W"), (5, 11, "W"), (6, 11, "W"), (7, 11, "R"), (er - 1, cl - 2, "C"), (er, cl - 2, "C")], over=True)
+        if g[7][10] == ".": g[7][10] = "B"
+        put(g, [(4, 11, "W"), (5, 11, "W"), (6, 11, "W"), (7, 11, "R"), (ER - 1, 1, "C"), (ER, 1, "C")], over=True)
         pal = mood_pal(pal, "#9ece6a", 0.45)
     elif mood == "asleep":  # eyes shut, dim, zzz
         eyes("dash")
@@ -216,25 +188,24 @@ def tail(path, n=8192):
         return []
 
 def status_state(lines):
-    """-> (state, text, at, validated). resolved/captain-held close an open decision or blocker."""
-    state, text, at, validated = None, "", 0, False
+    """-> (state, text, at). resolved/captain-held close an open decision or blocker."""
+    state, text, at = None, "", 0
     for line in lines:
         m = EVENT.match(line)
         if not m: continue
         verb, tok, body = m.groups()
         stamp = AT.search(tok or "") or AT.search(line)
-        if VALIDATING.search(body) and verb in ("working", "paused"): validated = True
         if verb == "note": continue
         if verb in ("resolved", "captain-held"):
             if state in ("needs-decision", "blocked"): state, text = "working", body
             continue
         state, text, at = verb, body, int(stamp.group(1)) if stamp else at
-    return state, text, at, validated
+    return state, text, at
 
 def read_worker(state_dir, wid, now):
     meta = read_meta(os.path.join(state_dir, wid + ".meta"))
     status_path = os.path.join(state_dir, wid + ".status")
-    st, text, at, validated = status_state(tail(status_path))
+    st, text, at = status_state(tail(status_path))
     kind = meta.get("kind", "ship")
     last_active = max(mtime(status_path), mtime(os.path.join(state_dir, wid + ".turn-ended")))
     fed_at = mtime(os.path.join(state_dir, wid + ".inbox", "handled"))  # dir mtime moves when a message is handled
@@ -251,16 +222,12 @@ def read_worker(state_dir, wid, now):
     if mood in ("busy", "training") and last_active and now - last_active > ASLEEP_SECS:
         mood, sub = "asleep", "silent " + age(now - last_active)
 
-    if st is None: stage = "egg"
-    elif validated or meta.get("pr") or (kind == "scout" and st == "done") or mood in ("calling", "party"): stage = "grown"
-    else: stage = "baby"
-
     hunger, hn = 5, "fed"
     if mood == "calling":
         waited = now - max(at or last_active, fed_at)
         hunger, hn = max(0, 5 - int(max(0, waited) // HUNGER_STEP)), "waiting " + age(max(0, now - (at or last_active)))
     project = os.path.basename(meta.get("project", "").rstrip("/")) or "?"
-    return dict(id=wid, project=project, kind=kind, mood=mood, stage=stage, bubble=bubble, sub=sub, born=born,
+    return dict(id=wid, project=project, kind=kind, mood=mood, bubble=bubble, sub=sub, born=born,
                 age=age(now - born), hunger=hunger, hn=hn, ws=meta.get("herdr_workspace_id"), tab=meta.get("herdr_tab_id"),
                 pane=meta.get("herdr_pane_id"), merge_ready=mood == "party" or (mood == "calling" and kind != "scout" and st == "done"))
 
@@ -296,7 +263,7 @@ class Pet:
             w["acc"] = self.accs[w["id"]]
         for wid, w in self.seen.items():  # record gone: a merge-ready worker was torn down after landing
             if wid not in live and w["merge_ready"]:
-                self.ghosts.append({**w, "mood": "party", "stage": "grown", "bubble": "", "sub": "merged!", "gone": now})
+                self.ghosts.append({**w, "mood": "party", "bubble": "", "sub": "merged!", "gone": now})
         self.seen = {w["id"]: w for w in workers}
         for g in [g for g in self.ghosts if now - g["gone"] >= PARTY_SECS]:
             self.ghosts.remove(g)
@@ -320,7 +287,7 @@ def cell(i, w):
     task = clip(short_task(w["id"], w["project"]), CW - 3 - len(proj) - 3)  # one column left free between cells
     label = c("e0af68", str(i), True) + " " + c(FG, proj, True) + c(DIM, " · ") + c("a9b1d6", task)
     last = c("ffffff", f'"{w["bubble"]}"', True) if w["bubble"] else c(DIM, w["sub"])
-    body = creature(w["mood"], w["stage"], w.get("acc"), colour_of(w["project"]))
+    body = creature(w["mood"], w.get("acc"), colour_of(w["project"]))
     return [center(x, CW) for x in body] + [center(label, CW), center(c(MC[w["mood"]], w["mood"]) + c(DIM, f" · {w['age']}"), CW),
             center(hearts(w["hunger"]) + c(DIM, " " + w["hn"]), CW), center(last, CW)]
 
@@ -333,38 +300,32 @@ def trophy_rows(items):
     tag = c(DIM, f"   +{more} earlier") if more > 0 else ""
     return [head + tag] + ["".join(padr(cl[i], 26) for cl in cells) for i in range(2)]
 
-def render(workers, trophies):
-    shown, more = workers[:SHOWN], len(workers) - SHOWN
-    if shown:
-        cols = [cell(i, w) for i, w in enumerate(shown, 1)]
-        rows = [""] + ["  " + "".join(col[i] for col in cols) for i in range(len(cols[0]))]
-    else:
-        rows = [""] * 5 + [center(c(DIM, "no workers aboard · Mochi waits for the next task"), W - 2)] + [""] * 5
-    sep = c(FRAME, " " + "─" * (W - 4))
-    keys = f"1-{len(shown)}" if len(shown) > 1 else "1"
-    rows += [sep] + trophy_rows(trophies) + [sep, " " + (c("e0af68", keys) + c(DIM, " focus worker  ") if shown else "") +
-             c("e0af68", "r") + c(DIM, " redraw  ") + c("e0af68", "q") + c(DIM, " close")]
+def panel(workers, rows):
+    more = len(workers) - SHOWN
     right = (c("e0af68", f"+{more} more", True) + c(DIM, " · ") if more > 0 else "") + c("9ece6a", "●") + c(DIM, f" live {POLL}s")
     return frame(f"herdr pet · {len(workers)} worker{'s' if len(workers) != 1 else ''}", rows, right)
 
-# ---- compact layout: one line per worker, for a short tiled strip ----
-FULL_ROWS = 19  # the full panel's height; anything shorter gets the compact strip
-FACE = dict(busy="(•_•)", training="(>_<)", calling="(°o°)", sick="(×_×)", asleep="(-_-)", party="(^o^)")
+def creatures(shown):  # up to four Mochis side by side, 10 rows: sprite, label, mood, hearts, bubble
+    if not shown: return [""] * 4 + [center(c(DIM, "no workers aboard · Mochi waits for the next task"), W - 2)] + [""] * 5
+    cols = [cell(i, w) for i, w in enumerate(shown, 1)]
+    return ["  " + "".join(col[i] for col in cols) for i in range(len(cols[0]))]
 
-def layout_for(rows): return "full" if rows >= FULL_ROWS else "compact"
+def render(workers, trophies):
+    shown = workers[:SHOWN]
+    sep = c(FRAME, " " + "─" * (W - 4))
+    keys = f"1-{len(shown)}" if len(shown) > 1 else "1"
+    rows = [""] + creatures(shown) + [sep] + trophy_rows(trophies) + [sep, " " + (c("e0af68", keys) + c(DIM, " focus worker  ") if shown else "") +
+            c("e0af68", "r") + c(DIM, " redraw  ") + c("e0af68", "q") + c(DIM, " close")]
+    return panel(workers, rows)
 
-def strip_row(i, w):
-    face = "( · )" if w["stage"] == "egg" else FACE[w["mood"]]
-    label = padr(c(FG, clip(w["project"], 10), True) + c(DIM, " · ") + c("a9b1d6", clip(short_task(w["id"], w["project"]), 11)), 24)
-    mood = padr(c(MC[w["mood"]], w["mood"]) + c(DIM, f" · {w['age']}"), 19)
-    last = clip(f'"{w["bubble"]}"' if w["bubble"] else w["sub"], 18)
-    last = c("ffffff", last, True) if w["bubble"] else c(DIM, last)
-    return (" " + c("e0af68", str(i), True) + " " + c(PROJECT_PALS[colour_of(w["project"])]["B"], face, True) + " " + label + " " +
-            mood + hearts(w["hunger"]) + " " + last)
+# ---- strip layout: the same Mochi row, trophies and keys on one line, for the pinned strip ----
+FULL_ROWS = 19   # the full panel's height; anything shorter gets the strip
+STRIP_ROWS = 13  # the strip's height: frame, the creature row, one trophy line
 
-def render_compact(workers, trophies):
-    shown, more = workers[:SHOWN], len(workers) - SHOWN
-    rows = [strip_row(i, w) for i, w in enumerate(shown, 1)] or [center(c(DIM, "no workers aboard · Mochi waits for the next task"), W - 2)]
+def layout_for(rows): return "full" if rows >= FULL_ROWS else "strip"
+
+def render_strip(workers, trophies):
+    shown = workers[:SHOWN]
     keys = (f"1-{len(shown)}" if len(shown) > 1 else "1") * bool(shown)
     keys_txt = (c("e0af68", keys) + c(DIM, " focus  ") if keys else "") + c("e0af68", "q") + c(DIM, " close")  # r still redraws
     room = W - 2 - vis(keys_txt) - 1 - len(" trophies ")
@@ -375,17 +336,14 @@ def render_compact(workers, trophies):
         cups.append(item)
     tro = " ".join([c("f7d774", " trophies", True), c(FG, "  ".join(cups)) if cups else c(DIM, "none yet")] +
                    [c(DIM, f" +{len(trophies) - len(cups)} earlier")] * (len(trophies) > len(cups)))
-    rows.append(padr(tro, W - 2 - vis(keys_txt) - 1) + keys_txt + " ")
-    right = (c("e0af68", f"+{more} more", True) + c(DIM, " · ") if more > 0 else "") + c("9ece6a", "●") + c(DIM, f" live {POLL}s")
-    return frame(f"herdr pet · {len(workers)} worker{'s' if len(workers) != 1 else ''}", rows, right)
+    return panel(workers, creatures(shown) + [padr(tro, W - 2 - vis(keys_txt) - 1) + keys_txt + " "])
 
 def draw(workers, trophies, rows):  # -> lines for a terminal this tall; never more lines than fit (that would scroll)
-    lines = render(workers, trophies) if layout_for(rows) == "full" else render_compact(workers, trophies)
+    lines = render(workers, trophies) if layout_for(rows) == "full" else render_strip(workers, trophies)
     return lines[:max(1, rows)]
 
-# ---- --pin: the startup hook. Opens the pet as a strip at the bottom of the Firstmate tab, once ----
+# ---- --pin: the startup hook. Opens the pet as a strip on top of the Firstmate tab, once ----
 TITLE = "Firstmate Pet"  # the pane label Herdr gives the plugin pane (manifest title)
-STRIP_ROWS = 8
 
 def same_dir(a, b): return bool(a and b) and os.path.realpath(a) == os.path.realpath(b)
 
@@ -395,7 +353,7 @@ def running_pet(info):  # Herdr restores a pet pane as a bare shell, so a pet pa
     return any("pet.py" in x.get("cmdline", "") for x in info.get("foreground_processes", []))
 
 def pin_target(panes, workspaces, home):
-    """-> the pane to split under: the one in the Firstmate home, else the focused (or first) pane of the active tab."""
+    """-> the pane to pin above: the one in the Firstmate home, else the focused (or first) pane of the active tab."""
     fm = next((p for p in panes if same_dir(p.get("cwd"), home)), None)
     if fm: return fm["pane_id"]
     tab = next((w.get("active_tab_id") for w in workspaces if w.get("focused")), None)
@@ -403,9 +361,17 @@ def pin_target(panes, workspaces, home):
     target = next((p for p in in_tab if p.get("focused")), in_tab[0] if in_tab else None)
     return target and target["pane_id"]
 
-def strip_amount(pet_h, target_h, rows=STRIP_ROWS):  # pane.resize takes a split-ratio delta: shrink the pet to ~rows
+def strip_amount(pet_h, target_h, rows):  # pane.resize takes a split-ratio delta: shrink the pet to rows (borders included)
     total = pet_h + target_h
     return round((pet_h - rows) / total, 3) if total and pet_h > rows else 0
+
+def refocus_cmds(was, pane, neighbor):
+    """-> Herdr calls that put focus back on `was` after `pane swap` focused `pane`. neighbor(d) -> pane_id next to `pane`."""
+    if not was or was["pane_id"] == pane["pane_id"]: return []
+    if was.get("tab_id") != pane.get("tab_id"):
+        return [c[1:] for c in focus_cmds(dict(ws=was.get("workspace_id"), tab=was.get("tab_id")))]
+    d = next((d for d in ("up", "down", "left", "right") if neighbor(d) == was["pane_id"]), None)
+    return [["pane", "focus", "--pane", pane["pane_id"], "--direction", d]] if d else []  # ponytail: a same-tab pane not touching the Firstmate pane keeps focus there
 
 def pin(herdr, home):
     import json, subprocess
@@ -420,14 +386,21 @@ def pin(herdr, home):
             print(f"pet pane already open: {p['pane_id']}"); return 0
         call("pane", "close", p["pane_id"]); panes.remove(p)  # a restored husk: replace it
     pane = pin_target(panes, call("workspace", "list")["workspaces"], home)
-    if not pane: print("no pane to pin under"); return 0
+    if not pane: print("no pane to pin to"); return 0
+    was = next((p for p in panes if p.get("focused")), None)
     opened = call("plugin", "pane", "open", "--plugin", os.environ.get("HERDR_PLUGIN_ID", "firstmate.pet"), "--entrypoint", "pet",
                   "--placement", "split", "--direction", "down", "--target-pane", pane, "--no-focus", "--env", f"FM_HOME={home}")
     new = opened["plugin_pane"]["pane"]["pane_id"]
+    # Herdr splits only right or down, so swap the pet above the pane. Swap focuses its source: make that the pane, then restore
+    call("pane", "swap", "--source-pane", pane, "--target-pane", new)
+    fm = next(p for p in panes if p["pane_id"] == pane)
+    for cmd in refocus_cmds(was, fm, lambda d: call("pane", "neighbor", "--pane", pane, "--direction", d)["neighbor"].get("neighbor_pane_id")):
+        call(*cmd)
     h = {p["pane_id"]: p["rect"]["height"] for p in call("pane", "layout", "--pane", new)["layout"]["panes"]}
-    amount = strip_amount(h.get(new, 0), h.get(pane, 0))
-    if amount: call("pane", "resize", "--pane", new, "--direction", "down", "--amount", str(amount))
-    print(f"pinned pet pane {new} under {pane}"); return 0
+    view = call("pane", "get", new)["pane"]["scroll"]["viewport_rows"]
+    amount = strip_amount(h.get(new, 0), h.get(pane, 0), STRIP_ROWS + h.get(new, 0) - view)
+    if amount: call("pane", "resize", "--pane", new, "--direction", "up", "--amount", str(amount))
+    print(f"pinned pet pane {new} above {pane}"); return 0
 
 # ---- config + live loop ----
 def fm_home():
@@ -482,7 +455,7 @@ def main(argv):
     if "--pin" in argv: return pin(os.environ.get("HERDR_BIN_PATH", "herdr"), fm_home())
     pet = Pet(fm_home())
     if "--once" in argv:
-        lay = render_compact if "--compact" in argv else render
+        lay = render_strip if "--strip" in argv else render
         print("\n".join(to_ansi(l) for l in lay(pet.poll(time.time()), pet.trophies)))
         return 0
     try: live(pet)
