@@ -1,4 +1,4 @@
-# herdr pet
+# Wallie's Wardens
 
 A Herdr pane that shows each Firstmate worker, and the main Firstmate session, as Mochi, a small amber cat-eared critter.
 It opens by itself as a strip at the top of the Firstmate tab, and as a full popup on demand.

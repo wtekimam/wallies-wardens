@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""herdr pet: one Mochi per Firstmate worker, plus one (blue, first) for the main Firstmate session, in a Herdr pane (a strip on top of the Firstmate tab, or a popup).
+"""Wallie's Wardens: one Mochi per Firstmate worker, plus one (blue, first) for the main Firstmate session, in a Herdr pane (a strip on top of the Firstmate tab, or a popup).
 
 Read-only view of a Firstmate home. The main session's mood is the agent_status of the Herdr pane whose cwd is the home
 (`herdr pane list`, once per poll). Per worker it reads only state/<id>.meta, the tail of
@@ -386,7 +386,7 @@ def panel(workers, rows, w=W, keys=""):
     more = len(workers) - SHOWN
     n = sum(not w.get("main") for w in workers)
     right = (c("e0af68", f"+{more} more", True) + c(DIM, " · ") if more > 0 else "") + c("9ece6a", "●") + c(DIM, f" live {POLL}s") + keys
-    return frame(f"herdr pet · {n} worker{'s' if n != 1 else ''}", rows, right, w)
+    return frame(f"Wallie's Wardens · {n} worker{'s' if n != 1 else ''}", rows, right, w)
 
 def creatures(shown, trophies, width=W, tick=None):  # up to eight Mochis, as many across as fit, CH rows each: sprite, two label lines, mood, hearts, bubble; trophies down the right edge
     cols, nrows, w = grid(len(shown), width)
@@ -420,11 +420,11 @@ def draw(workers, trophies, rows, width=W, tick=None):  # -> lines for a termina
     return lay(workers, trophies, width, tick)[:max(1, rows)]
 
 # ---- --pin: the startup hook. Opens the pet as a strip on top of the Firstmate tab, once ----
-TITLE = "Firstmate Pet"  # the pane label Herdr gives the plugin pane (manifest title)
+TITLE = "Wallie's Wardens"  # the pane label Herdr gives the plugin pane (manifest title)
 
 def same_dir(a, b): return bool(a and b) and os.path.realpath(a) == os.path.realpath(b)
 
-def is_pet(p): return p.get("label") == TITLE  # label only: a cwd match could close someone's shell in the plugin dir
+def is_pet(p): return p.get("label") in (TITLE, "Firstmate Pet")  # label only: a cwd match could close someone's shell in the plugin dir
 
 def running_pet(info):  # Herdr restores a pet pane as a bare shell, so a pet pane counts only while pet.py runs in it
     return any("pet.py" in x.get("cmdline", "") for x in info.get("foreground_processes", []))
