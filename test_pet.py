@@ -136,5 +136,80 @@ class Panel(unittest.TestCase):
         self.assertIn("demo", out)
         self.assertIn("busy", out)
 
+class Strip(unittest.TestCase):
+    def setUp(self): self.h = Home()
+    def tearDown(self): self.h.tmp.cleanup()
+
+    def plain(self, lines): return [pet.TAG.sub("", l) for l in lines]
+
+    def test_layout_follows_height(self):
+        self.assertEqual(pet.layout_for(pet.FULL_ROWS), "full")
+        self.assertEqual(pet.layout_for(pet.FULL_ROWS - 1), "compact")
+        self.assertEqual(pet.layout_for(8), "compact")
+        self.assertEqual(len(pet.draw([], [], 40)), pet.FULL_ROWS)  # the full panel is exactly FULL_ROWS tall
+        self.assertEqual(len(pet.draw([], [], 3)), 3)  # a tiny pane is clipped, never scrolled
+
+    def test_compact_fits_a_strip(self):
+        for i in range(6): self.h.worker(f"demo-t{i}", lines=[f"needs-decision [at={NOW}]: A or B"], born=NOW - 600 + i)
+        p = pet.Pet(self.h.root)
+        p.trophies = [("demo", f"cup{i}", "12:0" + str(i)) for i in range(9)]
+        out = self.plain(pet.draw(p.poll(NOW), p.trophies, 8))
+        self.assertEqual(len(out), 7)  # top, four workers, trophy line, bottom
+        self.assertTrue(all(len(l) == pet.W for l in out), [len(l) for l in out])
+        self.assertIn("+2 more", out[0])
+        self.assertIn("4 (°o°) demo · t3", out[4])
+        self.assertIn('"your call!"', out[1])
+        self.assertIn("demo · cup8 12:08", out[5])  # newest cup first
+        self.assertIn("earlier", out[5])
+        self.assertIn("q close", out[5])
+
+    def test_compact_empty_and_egg(self):
+        out = self.plain(pet.render_compact([], []))
+        self.assertEqual(len(out), 4)
+        self.assertIn("no workers aboard", out[1])
+        self.assertIn("none yet", out[2])
+        self.h.worker("demo-new")
+        out = self.plain(pet.render_compact(pet.Pet(self.h.root).poll(NOW), []))
+        self.assertIn("1 ( · ) demo · new", out[1])
+        self.assertTrue(all(len(l) == pet.W for l in out))
+
+class Pin(unittest.TestCase):
+    HOME, ROOT = "/fm", "/plugins/firstmate.pet"
+    WS = [dict(workspace_id="w1", active_tab_id="w1:t1", focused=False), dict(workspace_id="w2", active_tab_id="w2:t3", focused=True)]
+    def pane(self, pid, cwd, **kw): return dict(pane_id=pid, cwd=cwd, tab_id=pid.replace(":p", ":t"), **kw)
+
+    def test_opens_under_the_firstmate_pane(self):
+        panes = [self.pane("w2:p3", "/x", focused=True), self.pane("w1:p1", self.HOME)]
+        self.assertEqual(pet.pin_target(panes, self.WS, self.HOME), "w1:p1")
+
+    def test_falls_back_to_the_active_tab(self):
+        panes = [self.pane("w1:p1", "/a"), self.pane("w2:p3", "/b"), self.pane("w2:p4", "/c", focused=True)]
+        panes[2]["tab_id"] = "w2:t3"
+        self.assertEqual(pet.pin_target(panes, self.WS, self.HOME), "w2:p4")
+        self.assertEqual(pet.pin_target(panes[:2], self.WS, self.HOME), "w2:p3")
+        self.assertFalse(pet.pin_target([], self.WS, self.HOME))
+
+    def test_realpath_match(self):
+        with tempfile.TemporaryDirectory() as d:
+            link = d + "-link"
+            os.symlink(d, link)
+            try: self.assertEqual(pet.pin_target([self.pane("w1:p1", os.path.realpath(d))], self.WS, link), "w1:p1")
+            finally: os.remove(link)
+
+    def test_pet_pane_found_by_label_only(self):
+        self.assertTrue(pet.is_pet(self.pane("w1:p2", self.ROOT, label=pet.TITLE)))
+        self.assertFalse(pet.is_pet(self.pane("w1:p3", self.ROOT)))  # a shell in the plugin dir is not the pet
+
+    def test_restored_shell_is_not_a_running_pet(self):  # shapes from `herdr pane process-info`
+        live = dict(foreground_processes=[dict(cmdline="python3 /plugins/firstmate.pet/pet.py")])
+        husk = dict(foreground_processes=[dict(cmdline="-zsh")])
+        self.assertTrue(pet.running_pet(live))
+        self.assertFalse(pet.running_pet(husk))
+        self.assertFalse(pet.running_pet({}))
+
+    def test_strip_amount(self):
+        self.assertEqual(pet.strip_amount(20, 20), 0.3)  # 40-row tab: 20 -> 8 rows
+        self.assertEqual(pet.strip_amount(6, 30), 0)  # already short: leave it
+
 if __name__ == "__main__":
     unittest.main()

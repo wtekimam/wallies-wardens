@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""herdr pet: one Mochi per Firstmate worker, in a Herdr popup pane.
+"""herdr pet: one Mochi per Firstmate worker, in a Herdr pane (a strip under the Firstmate tab, or a popup).
 
 Read-only view of a Firstmate home. Per worker it reads only state/<id>.meta, the tail of
 state/<id>.status, the mtime of state/<id>.turn-ended and the mtime of state/<id>.inbox/handled/.
 It never writes under the Firstmate home and never runs Firstmate scripts.
 
   python3 pet.py            live pane: poll every 3s, redraw only when the frame changes
-  python3 pet.py --once     print one frame to stdout and exit
+  python3 pet.py --once     print one frame to stdout and exit (--once --compact: the short-strip frame)
+  python3 pet.py --pin      open the pet as a short strip in the Firstmate tab unless one is open (startup hook)
 """
 import os, re, sys, time, zlib
 
@@ -346,6 +347,88 @@ def render(workers, trophies):
     right = (c("e0af68", f"+{more} more", True) + c(DIM, " · ") if more > 0 else "") + c("9ece6a", "●") + c(DIM, f" live {POLL}s")
     return frame(f"herdr pet · {len(workers)} worker{'s' if len(workers) != 1 else ''}", rows, right)
 
+# ---- compact layout: one line per worker, for a short tiled strip ----
+FULL_ROWS = 19  # the full panel's height; anything shorter gets the compact strip
+FACE = dict(busy="(•_•)", training="(>_<)", calling="(°o°)", sick="(×_×)", asleep="(-_-)", party="(^o^)")
+
+def layout_for(rows): return "full" if rows >= FULL_ROWS else "compact"
+
+def strip_row(i, w):
+    face = "( · )" if w["stage"] == "egg" else FACE[w["mood"]]
+    label = padr(c(FG, clip(w["project"], 10), True) + c(DIM, " · ") + c("a9b1d6", clip(short_task(w["id"], w["project"]), 11)), 24)
+    mood = padr(c(MC[w["mood"]], w["mood"]) + c(DIM, f" · {w['age']}"), 19)
+    last = clip(f'"{w["bubble"]}"' if w["bubble"] else w["sub"], 18)
+    last = c("ffffff", last, True) if w["bubble"] else c(DIM, last)
+    return (" " + c("e0af68", str(i), True) + " " + c(PROJECT_PALS[colour_of(w["project"])]["B"], face, True) + " " + label + " " +
+            mood + hearts(w["hunger"]) + " " + last)
+
+def render_compact(workers, trophies):
+    shown, more = workers[:SHOWN], len(workers) - SHOWN
+    rows = [strip_row(i, w) for i, w in enumerate(shown, 1)] or [center(c(DIM, "no workers aboard · Mochi waits for the next task"), W - 2)]
+    keys = (f"1-{len(shown)}" if len(shown) > 1 else "1") * bool(shown)
+    keys_txt = (c("e0af68", keys) + c(DIM, " focus  ") if keys else "") + c("e0af68", "q") + c(DIM, " close")  # r still redraws
+    room = W - 2 - vis(keys_txt) - 1 - len(" trophies ")
+    cups = []
+    for k, (p, t, tm) in enumerate(reversed(trophies), 1):  # newest first, as many as fit
+        item = f"{clip(p, 8)} · {clip(t, 8)} {tm}"
+        if len("  ".join(cups + [item])) + (len(f"  +{len(trophies)} earlier") if k < len(trophies) else 0) > room: break
+        cups.append(item)
+    tro = " ".join([c("f7d774", " trophies", True), c(FG, "  ".join(cups)) if cups else c(DIM, "none yet")] +
+                   [c(DIM, f" +{len(trophies) - len(cups)} earlier")] * (len(trophies) > len(cups)))
+    rows.append(padr(tro, W - 2 - vis(keys_txt) - 1) + keys_txt + " ")
+    right = (c("e0af68", f"+{more} more", True) + c(DIM, " · ") if more > 0 else "") + c("9ece6a", "●") + c(DIM, f" live {POLL}s")
+    return frame(f"herdr pet · {len(workers)} worker{'s' if len(workers) != 1 else ''}", rows, right)
+
+def draw(workers, trophies, rows):  # -> lines for a terminal this tall; never more lines than fit (that would scroll)
+    lines = render(workers, trophies) if layout_for(rows) == "full" else render_compact(workers, trophies)
+    return lines[:max(1, rows)]
+
+# ---- --pin: the startup hook. Opens the pet as a strip at the bottom of the Firstmate tab, once ----
+TITLE = "Firstmate Pet"  # the pane label Herdr gives the plugin pane (manifest title)
+STRIP_ROWS = 8
+
+def same_dir(a, b): return bool(a and b) and os.path.realpath(a) == os.path.realpath(b)
+
+def is_pet(p): return p.get("label") == TITLE  # label only: a cwd match could close someone's shell in the plugin dir
+
+def running_pet(info):  # Herdr restores a pet pane as a bare shell, so a pet pane counts only while pet.py runs in it
+    return any("pet.py" in x.get("cmdline", "") for x in info.get("foreground_processes", []))
+
+def pin_target(panes, workspaces, home):
+    """-> the pane to split under: the one in the Firstmate home, else the focused (or first) pane of the active tab."""
+    fm = next((p for p in panes if same_dir(p.get("cwd"), home)), None)
+    if fm: return fm["pane_id"]
+    tab = next((w.get("active_tab_id") for w in workspaces if w.get("focused")), None)
+    in_tab = [p for p in panes if p.get("tab_id") == tab]
+    target = next((p for p in in_tab if p.get("focused")), in_tab[0] if in_tab else None)
+    return target and target["pane_id"]
+
+def strip_amount(pet_h, target_h, rows=STRIP_ROWS):  # pane.resize takes a split-ratio delta: shrink the pet to ~rows
+    total = pet_h + target_h
+    return round((pet_h - rows) / total, 3) if total and pet_h > rows else 0
+
+def pin(herdr, home):
+    import json, subprocess
+    def call(*args):
+        r = subprocess.run([herdr, *args], capture_output=True, text=True, timeout=10)
+        out = json.loads(r.stdout or "{}")
+        if "error" in out or r.returncode: raise RuntimeError(f"herdr {' '.join(args)}: {r.stdout.strip() or r.stderr.strip()}")
+        return out["result"]
+    panes = call("pane", "list")["panes"]
+    for p in [p for p in panes if is_pet(p)]:
+        if running_pet(call("pane", "process-info", "--pane", p["pane_id"])["process_info"]):
+            print(f"pet pane already open: {p['pane_id']}"); return 0
+        call("pane", "close", p["pane_id"]); panes.remove(p)  # a restored husk: replace it
+    pane = pin_target(panes, call("workspace", "list")["workspaces"], home)
+    if not pane: print("no pane to pin under"); return 0
+    opened = call("plugin", "pane", "open", "--plugin", os.environ.get("HERDR_PLUGIN_ID", "firstmate.pet"), "--entrypoint", "pet",
+                  "--placement", "split", "--direction", "down", "--target-pane", pane, "--no-focus", "--env", f"FM_HOME={home}")
+    new = opened["plugin_pane"]["pane"]["pane_id"]
+    h = {p["pane_id"]: p["rect"]["height"] for p in call("pane", "layout", "--pane", new)["layout"]["panes"]}
+    amount = strip_amount(h.get(new, 0), h.get(pane, 0))
+    if amount: call("pane", "resize", "--pane", new, "--direction", "down", "--amount", str(amount))
+    print(f"pinned pet pane {new} under {pane}"); return 0
+
 # ---- config + live loop ----
 def fm_home():
     if os.environ.get("FM_HOME"): return os.environ["FM_HOME"]
@@ -361,21 +444,28 @@ def focus_cmds(w, herdr="herdr"):  # the CLI has no pane focus by id: focus the 
     return [[herdr, "workspace", "focus", w["ws"]]] * bool(w.get("ws")) + [[herdr, "tab", "focus", w["tab"]]] * bool(w.get("tab"))
 
 def live(pet):
-    import select, termios, tty
+    import select, signal, termios, tty
     fd, out = sys.stdin.fileno(), sys.stdout
+    tiled = bool(os.environ.get("HERDR_PANE_ID"))  # a popup gets no pane id; a tiled strip stays open after a focus
     old = termios.tcgetattr(fd)
     tty.setcbreak(fd)
+    wake_r, wake_w = os.pipe()
+    os.set_blocking(wake_w, False)
+    signal.signal(signal.SIGWINCH, lambda *_: None)
+    signal.set_wakeup_fd(wake_w)  # a resize wakes the select below instead of waiting out the poll
     out.write("\x1b[?1049h\x1b[?25l"); out.flush()
     last, workers = None, []
     try:
         while True:
             workers = pet.poll(time.time())
-            text = "\n".join(to_ansi(l) for l in render(workers, pet.trophies))
+            text = "\n".join(to_ansi(l) for l in draw(workers, pet.trophies, os.get_terminal_size(fd).lines))
             if text != last:  # redraw only on change
                 out.write("\x1b[H\x1b[2J" + text); out.flush(); last = text
-            if not select.select([fd], [], [], POLL)[0]: continue
+            ready = select.select([fd, wake_r], [], [], POLL)[0]
+            if wake_r in ready: os.read(wake_r, 64); last = None
+            if fd not in ready: continue
             key = os.read(fd, 1).decode(errors="ignore")
-            if key in ("q", "\x1b", "\x03"): return
+            if key in ("q", "\x03") or key == "\x1b" and not tiled: return  # Esc starts arrow keys too: only the popup takes it
             if key == "r": last = None
             elif key.isdigit() and 1 <= int(key) <= min(SHOWN, len(workers)):
                 w = workers[int(key) - 1]
@@ -383,15 +473,17 @@ def live(pet):
                 import subprocess
                 for cmd in focus_cmds(w, os.environ.get("HERDR_BIN_PATH", "herdr")):
                     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-                return  # the popup is modal: close it so the focused worker is visible
+                if not tiled: return  # the popup is modal: close it so the focused worker is visible
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         out.write("\x1b[0m\x1b[?25h\x1b[?1049l"); out.flush()
 
 def main(argv):
+    if "--pin" in argv: return pin(os.environ.get("HERDR_BIN_PATH", "herdr"), fm_home())
     pet = Pet(fm_home())
     if "--once" in argv:
-        print("\n".join(to_ansi(l) for l in render(pet.poll(time.time()), pet.trophies)))
+        lay = render_compact if "--compact" in argv else render
+        print("\n".join(to_ansi(l) for l in lay(pet.poll(time.time()), pet.trophies)))
         return 0
     try: live(pet)
     except KeyboardInterrupt: pass
