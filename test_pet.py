@@ -194,6 +194,15 @@ class Panel(unittest.TestCase):
         self.assertEqual(sorted(t[:2] for t in p.trophies if t[0]), [("fromledger", "both"), ("frommeta", "meta")])
         self.assertEqual([t[:2] for t in p.trophies if not t[0]], [(None, "m null")])  # neither: project omitted
 
+    def test_project_falls_back_to_projects_md(self):
+        os.makedirs(os.path.join(self.h.root, "data"))
+        with open(os.path.join(self.h.root, "data", "projects.md"), "w") as f:
+            f.write("# Projects\n\n- sb [x] - short\n- sbmail [no-mistakes] - Purchase orders\n")
+        self.ledger(*[dict(v=1, ts=NOW, event="task.merged", task=t, via="local") for t in ("sbmail-inbound-line-search", "sbmailer-x", "sb-y")])
+        p = pet.Pet(self.h.root)
+        p.poll(NOW)
+        self.assertEqual(sorted((t[0], t[3]) for t in p.trophies if t[0]), [("sb", "y"), ("sbmail", "inbound-line-search")])  # longest match wins; sbmailer-x has none
+
     def test_only_todays_merges(self):
         day = 86400
         self.ledger(*[dict(v=1, ts=NOW + k * day, event="task.merged", task=n, via="local") for n, k in (("old", -2), ("yest", -1), ("now", 0), ("later", 1))])

@@ -131,7 +131,7 @@ A worker keeps its accessory, and a newcomer takes the first one free in its pro
 The collar is cyan, except on a teal Mochi, where it is red so it shows.
 
 **Trophies:** every `task.merged` record in the Firstmate home's fleet activity ledger (`state/fleet-ledger.jsonl`) counts toward its project's gold cup (`×N`), whether the PR merged on GitHub or a local-only branch landed.
-The project comes from the task's `task.dispatched` record, else the `project=` basename in `state/<id>.meta`, else it is left out.
+The project comes from the task's `task.dispatched` record, else the `project=` basename in `state/<id>.meta`, else the longest project name in the home's `data/projects.md` that the task id starts with (followed by `-`), else it is left out.
 Both views show today's merges only (local day of the record's `ts`). The room reads `PR #<n>` from the record's `pr` URL, or `local` for `via: local`. Cups come from the file, so closing the pane or restarting keeps them.
 When a merge record arrives for a Mochi that is still shown, it parties for 30 seconds. Records already in the file at startup, or for a Mochi that is gone, don't party.
 A merge only counts when Firstmate records it and the ledger is on for that home (the `config/fleet-ledger` flag, see Firstmate's `docs/fleet-ledger.md`). With the flag off there are no cups.

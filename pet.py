@@ -277,6 +277,13 @@ class Ledger:
         try: return os.path.basename(read_meta(os.path.join(self.state, task + ".meta")).get("project", "").rstrip("/")) or None
         except OSError: return None
 
+    def listed_project(self, task):  # last resort: the longest name in the home's data/projects.md that the task id starts with, then "-"
+        try:
+            with open(os.path.join(os.path.dirname(self.state), "data", "projects.md")) as f:
+                names = [m[1] for m in (re.match(r"- (\S+) ", l) for l in f) if m]
+        except OSError: return None
+        return max((n for n in names if task.startswith(n + "-")), key=len, default=None)
+
     def read(self):  # -> the merge records that arrived since the last read; a missing file is just empty
         try: size = os.stat(self.path).st_size
         except OSError: size = 0
@@ -300,7 +307,7 @@ class Ledger:
                 self.keys.add((task, ts))
                 pr = re.search(r"/pull/(\d+)", rec["pr"]) if isinstance(rec.get("pr"), str) else None
                 ref = f"PR #{pr[1]}" if pr else "local" if rec.get("via") == "local" else ""
-                new.append(dict(task=task, ts=ts, project=self.projects.get(task) or self.meta_project(task), ref=ref))
+                new.append(dict(task=task, ts=ts, project=self.projects.get(task) or self.meta_project(task) or self.listed_project(task), ref=ref))
         self.merged += new
         return new
 
