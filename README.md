@@ -3,7 +3,7 @@
 A Herdr pane that shows each Firstmate worker, and the main Firstmate session, as Mochi, a small amber cat-eared critter.
 It opens by itself as a strip at the top of the Firstmate tab, and as a full popup on demand.
 Each Mochi shows its worker's mood with a small idle animation, gets hungry while it waits on you,
-and leaves a gold cup in a trophy column at the right edge for every merge Firstmate records.
+and leaves a gold cup in a trophy column at the right edge for every project Firstmate records a merge for.
 
 Plain python3 (stdlib only) with no dependencies. It makes no network calls and writes nothing.
 
@@ -47,9 +47,11 @@ A tiled strip on top of the Firstmate tab is the closest fit.
 Any more workers show as `+N more` in the title.
 Each Mochi has a two-line label: `N project` (`1 main` for the main session), then the task or session name.
 Each line is centred and cut to the column width on its own.
-The trophy column (24 columns wide) sits at the right edge, one trophy per row, newest on top, with `+N more` when they don't fit.
+The trophy column (24 columns wide) sits at the right edge with one cup per project: the project name and `×N` (today's merges), the project with the newest merge on top, and a `today: N` total under the heading. `+N more` counts the projects that don't fit.
+Press `t` for the trophy room: it replaces the Mochis and the column with a full-width list, grouped by project (cup and `project ×N`, newest project first), then one line per merge with its local time, task name (without the leading `<project>-`) and `PR #<n>` or `local`. It has no scrolling; what doesn't fit ends in `+N more`. `t` again returns to the Mochis.
+The footer shows `t trophies` (`t back` in the trophy room), `r redraw` and `q close`.
 When the pane is too short for the full panel (16 rows, plus 11 per further row of Mochis), the pet draws the strip:
-the same Mochis and trophy column, with `q close` in the title bar.
+the same Mochis and trophy column, with `t trophies` and `q close` in the title bar. `t` works there too, and the strip keeps its height when you switch.
 The strip needs 13 rows, plus 11 per further row. It redraws when the pane is resized.
 
 ## Config
@@ -69,6 +71,7 @@ With eight animated Mochis the pane used about 0.4% of one CPU core, measured ov
 
 | key | action |
 |---|---|
+| `t` | toggle the trophy room (the Mochis come back on the next `t`) |
 | `r` | redraw |
 | `q` | close |
 | `Esc` | close the popup (the strip ignores it, so arrow keys don't close it) |
@@ -127,9 +130,9 @@ Every worker wears an accessory, given in this order within its project: collar,
 A worker keeps its accessory, and a newcomer takes the first one free in its project.
 The collar is cyan, except on a teal Mochi, where it is red so it shows.
 
-**Trophies:** every `task.merged` record in the Firstmate home's fleet activity ledger (`state/fleet-ledger.jsonl`) is one gold cup, labelled `project · task`, whether the PR merged on GitHub or a local-only branch landed.
+**Trophies:** every `task.merged` record in the Firstmate home's fleet activity ledger (`state/fleet-ledger.jsonl`) counts toward its project's gold cup (`×N`), whether the PR merged on GitHub or a local-only branch landed.
 The project comes from the task's `task.dispatched` record, else the `project=` basename in `state/<id>.meta`, else it is left out.
-The column shows today's merges only (local day of the record's `ts`), newest on top. Cups come from the file, so closing the pane or restarting keeps them.
+Both views show today's merges only (local day of the record's `ts`). The room reads `PR #<n>` from the record's `pr` URL, or `local` for `via: local`. Cups come from the file, so closing the pane or restarting keeps them.
 When a merge record arrives for a Mochi that is still shown, it parties for 30 seconds. Records already in the file at startup, or for a Mochi that is gone, don't party.
 A merge only counts when Firstmate records it and the ledger is on for that home (the `config/fleet-ledger` flag, see Firstmate's `docs/fleet-ledger.md`). With the flag off there are no cups.
 A repeated record for the same task and time counts once.

@@ -216,17 +216,67 @@ class Panel(unittest.TestCase):
         self.assertEqual(len(p.trophies), 3)
 
     def test_trophy_column(self):
-        items = [("p", f"t{i}", "12:00") for i in range(30)]
-        col = [pet.TAG.sub("", l) for l in pet.trophy_col(items, 6)]
-        self.assertEqual(len(col), 6)
+        items = [(f"p{i}", "t", "12:0" + str(i % 10), "t", "local") for i in range(30)]
+        col = [pet.TAG.sub("", l) for l in pet.trophy_col(items, 8)]
+        self.assertEqual(len(col), 8)
         self.assertTrue(all(len(l) == pet.TW for l in col))
-        self.assertIn("t29", col[1])  # newest on top, cup line
-        self.assertIn("merged 12:00", col[2])  # cup bottom line for t29
-        self.assertIn("t28", col[3])  # second trophy
-        self.assertIn("+28 more", col[5])  # overflow: 30 total, 2 shown
+        self.assertIn("today: 30", col[1])
+        self.assertIn("p29 ×1", col[2])  # newest project on top
+        self.assertIn("last 12:09", col[3])
+        self.assertIn("p28 ×1", col[4])
+        self.assertIn("+28 more", col[6])  # overflow counts projects: 30 total, 2 shown
         self.assertIn("none yet today", pet.TAG.sub("", "".join(pet.trophy_col([], 4))))
-        out = "".join(pet.TAG.sub("", l) for l in pet.trophy_col(items[:2], 6))
-        self.assertNotIn("more", out)  # 2 items fit: 1 heading + 2 trophy lines + padding
+        self.assertNotIn("more", "".join(pet.TAG.sub("", l) for l in pet.trophy_col(items[:2], 8)))
+
+    def test_trophies_group_by_project_newest_first(self):
+        items = [("a", "x", "09:00", "x", ""), ("b", "y", "10:00", "y", ""), ("a", "z", "11:00", "z", ""), (None, "q", "12:00", "q", "")]
+        self.assertEqual([(p, len(ts)) for p, ts in pet.by_project(items)], [(None, 1), ("a", 2), ("b", 1)])
+        col = [pet.TAG.sub("", l) for l in pet.trophy_col(items, 12)]
+        self.assertIn("today: 4", col[1])
+        self.assertIn("no project ×1", col[2])
+        self.assertIn("a ×2", col[4])
+        self.assertIn("last 11:00", col[5])  # the newest merge of the project
+
+    def test_room_name_and_ref(self):
+        self.assertEqual(pet.room_name("alpha-fix-it", "alpha"), "fix-it")
+        self.assertEqual(pet.room_name("alpha", "alpha"), "alpha")
+        self.assertEqual(pet.room_name("beta-x", "alpha"), "beta-x")
+        self.assertEqual(pet.room_name("beta-x", None), "beta-x")
+        self.ledger(dict(v=1, ts=NOW - 3, event="task.dispatched", task="a-one", project="/x/a"),
+                    dict(v=1, ts=NOW - 2, event="task.merged", task="a-one", via="pr", pr="https://github.com/o/r/pull/42"),
+                    dict(v=1, ts=NOW - 1, event="task.merged", task="a-two", via="local"))
+        p = pet.Pet(self.h.root)
+        p.poll(NOW)
+        self.assertEqual([t[3:] for t in p.trophies], [("one", "PR #42"), ("a-two", "local")])
+
+    def test_trophy_room(self):
+        items = [("a", "x", "09:00", "fix-x", "PR #7"), ("b", "y", "10:00", "y", "local"), ("a", "z", "11:00", "z", "PR #9")]
+        out = [pet.TAG.sub("", l) for l in pet.trophy_room(items, 9, 70)]
+        self.assertEqual((len(out), {len(l) for l in out}), (9, {70}))
+        self.assertIn("trophy room", out[0])
+        self.assertIn("a ×2", out[1])  # newest project first (a's 11:00 beats b's 10:00)
+        self.assertIn("11:00 z PR #9", out[2])
+        self.assertIn("09:00 fix-x PR #7", out[3])
+        self.assertIn("b ×1", out[4])
+        self.assertIn("10:00 y local", out[5])
+        out = [pet.TAG.sub("", l) for l in pet.trophy_room(items, 5, 70)]  # b's header would be last: cut it, count its merge
+        self.assertIn("09:00 fix-x", out[3])
+        self.assertIn("+1 more", out[4])
+        out = [pet.TAG.sub("", l) for l in pet.trophy_room(items, 3, 70)]  # a's header without any merge is dropped too
+        self.assertIn("+3 more", out[1])
+        self.assertIn("none yet today", pet.TAG.sub("", pet.trophy_room([], 3, 70)[0]))
+
+    def test_room_toggle_keeps_the_height(self):
+        ws = [pet.main_worker(dict(agent_status="working"))]
+        items = [("demo", "t", "12:00", "t", "local")] * 5
+        for rows in (pet.STRIP_ROWS, 40):
+            a, b = pet.draw(ws, items, rows), pet.draw(ws, items, rows, room=True)
+            self.assertEqual(len(a), len(b))
+            self.assertNotIn("main", "".join(pet.TAG.sub("", l) for l in b[3:-3]))
+        self.assertIn("t trophies", "".join(pet.TAG.sub("", l) for l in pet.draw(ws, items, 40)))
+        self.assertIn("t back", "".join(pet.TAG.sub("", l) for l in pet.draw(ws, items, 40, room=True)))
+        self.assertIn("t back", pet.TAG.sub("", pet.draw(ws, items, pet.STRIP_ROWS, room=True)[0]))
+        self.assertIn("t trophies", pet.TAG.sub("", pet.draw(ws, items, pet.STRIP_ROWS)[0]))
 
     def test_sprites_match_the_agreed_mochi(self):
         # crc32 of every mood x colour x accessory (frame 0) as drawn by the approved design (herdr-pet-tamagotchi-alts/build.py),
@@ -319,9 +369,9 @@ class Strip(unittest.TestCase):
     def test_strip_draws_mochi(self):
         for i in range(10): self.h.worker(f"demo-t{i}", lines=[f"needs-decision [at={NOW}]: A or B"], born=NOW - 600 + i)
         p = pet.Pet(self.h.root)
-        p.trophies = [("demo", f"cup{i}", "12:0" + str(i)) for i in range(60)]
+        p.trophies = [("demo", f"cup{i}", "12:0" + str(i), f"cup{i}", "") for i in range(60)]
         ws = p.poll(NOW)
-        p.trophies = [("demo", f"cup{i}", "12:0" + str(i)) for i in range(60)]
+        p.trophies = [("demo", f"cup{i}", "12:0" + str(i), f"cup{i}", "") for i in range(60)]
         self.assertEqual(len(pet.draw(ws, p.trophies, pet.STRIP_ROWS)), pet.STRIP_ROWS)  # a short pane clips, never scrolls
         rows = pet.strip_rows(len(ws))  # eight Mochis, two across: four rows
         lines = pet.draw(ws, p.trophies, rows)
@@ -339,12 +389,10 @@ class Strip(unittest.TestCase):
         self.assertIn('"your call!"', out[11])
         self.assertIn("7 demo", out[1 + 3 * pet.CH + 6])
         self.assertIn("trophies · today", out[1])
-        self.assertIn("demo · cup59", out[2])  # newest on top, cup top line
-        self.assertIn("merged", out[3])  # cup bottom line
-        self.assertIn("demo · cup58", out[4])  # next trophy
-        # Trophy column gets len(body) lines where body is creature rows; 8 workers in 2 cols x 4 rows = 44 lines
-        # 44 lines = heading + 21 trophies (42 lines) + overflow = 44 lines, leaves 39 more (60 - 21 = 39)
-        self.assertIn("+39 more", "".join(out))  # overflow visible in the full output
+        self.assertIn("today: 60", out[2])
+        self.assertIn("demo ×60", out[3])  # one cup for the whole project
+        self.assertIn("last 12:059", out[4])
+        self.assertNotIn("more", out[5][-pet.TW:])  # a single project never overflows
         self.assertTrue(all(o[-pet.TW - 1] == "│" for o in out[1:-1]))  # the column sits at the right edge
 
     def test_strip_empty(self):
