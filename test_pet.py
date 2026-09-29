@@ -1,5 +1,5 @@
 """python3 -m unittest test_pet  -- fixture Firstmate-style state dirs, no live home touched."""
-import os, subprocess, sys, tempfile, time, unittest, zlib
+import json, os, subprocess, sys, tempfile, time, unittest, zlib
 import pet
 
 NOW = 1790000000
@@ -86,24 +86,26 @@ class Panel(unittest.TestCase):
         p = pet.Pet(self.h.root)
         out = self.plain(pet.render(p.poll(NOW), p.trophies))
         self.assertIn("+2 more", out[0])
-        self.assertIn("8 demo · t7", "\n".join(out))
-        self.assertNotIn("demo · t8", "\n".join(out))
+        self.assertIn("8 demo", "\n".join(out))
+        self.assertNotIn("9 demo", "\n".join(out))
         self.assertTrue(all(len(l) == pet.W for l in out), [len(l) for l in out])
 
     def test_layout_one_to_nine(self):
-        for n in range(1, 10):  # 80 columns: four across, a second row from the fifth, never a third
-            self.assertEqual(pet.grid(n), (4, 1 if n <= 4 else 2, pet.W))
-            self.assertEqual(pet.strip_rows(n), pet.STRIP_ROWS if n <= 4 else pet.STRIP_ROWS + pet.CH)
+        for n in range(1, 10):  # 80 columns: the trophy column leaves two Mochis across, so up to four rows
+            rows = -(-min(n, 8) // 2)
+            self.assertEqual(pet.grid(n), (2, rows, pet.W))
+            self.assertEqual(pet.strip_rows(n), pet.STRIP_ROWS + pet.CH * (rows - 1))
             ws = [dict(id=f"demo-t{i}", project="demo", mood="busy", bubble="", sub="", age="1m", hunger=5, hn="fed", acc="cap") for i in range(n)]
             out = self.plain(pet.render_strip(ws, []))
             self.assertEqual(len(out), pet.strip_rows(n))
             self.assertTrue(all(len(l) == pet.W for l in out), (n, [len(l) for l in out]))
             self.assertEqual(("+1 more" in out[0]), n == 9)
-        self.assertEqual(pet.grid(8, 160), (8, 1, 156))  # a wide pane fits all eight in one row
-        self.assertEqual(pet.grid(8, 120), (6, 2, 118))
-        self.assertEqual(pet.grid(3, 40), (4, 1, pet.W))  # narrower than 80 keeps the 80-column four
-        self.assertEqual(pet.layout_for(pet.FULL_ROWS, 8), "strip")  # two rows need a taller pane for the full panel
-        self.assertEqual(pet.layout_for(pet.FULL_ROWS + pet.CH, 8), "full")
+        self.assertEqual(pet.grid(8, 240), (8, 1, 8 * pet.CW + 4 + pet.TW))  # a wide pane fits all eight in one row
+        self.assertEqual(pet.grid(8, 160), (6, 2, 6 * pet.CW + 4 + pet.TW))
+        self.assertEqual(pet.grid(3, 40), (2, 2, pet.W))  # narrower than 80 keeps the 80-column frame
+        self.assertEqual(pet.layout_for(pet.FULL_ROWS, 8, 240), "full")
+        self.assertEqual(pet.layout_for(pet.FULL_ROWS, 8), "strip")  # four rows need a taller pane for the full panel
+        self.assertEqual(pet.layout_for(pet.FULL_ROWS + 3 * pet.CH, 8), "full")
 
     def test_accessories_everyone_wears_one(self):
         ids = [self.h.worker(f"demo-t{i}", lines=[f"working [at={NOW}]: go"], born=NOW - 900 + i) for i in range(7)]
@@ -140,20 +142,89 @@ class Panel(unittest.TestCase):
         self.assertNotEqual(c(1)[1], c(2)[1])
         self.assertEqual(pet.cell(1, ws[0])[:6], [pet.center(x, pet.CW) for x in pet.creature("busy", "cap", pet.colour_of("demo"))])  # still: frame 0 for all
 
-    def test_trophy_after_merge_only(self):
-        merged = self.h.worker("demo-merge", lines=[f"done [at={NOW}]: PR https://x/pull/1"])
-        dropped = self.h.worker("demo-drop", lines=[f"working [at={NOW}]: go"])
+    def test_label_two_lines(self):
+        w = dict(id="kara-web-unhide", project="kara-website", mood="busy", bubble="", sub="", age="1m", hunger=5, hn="fed", acc="cap")
+        cell = [pet.TAG.sub("", l) for l in pet.cell(2, w)]
+        self.assertEqual((cell[6].strip(), cell[7].strip()), ("2 kara-website", "unhide"))
+        long = dict(w, id="x-" + "y" * 40, project="p" * 40)
+        cell = [pet.TAG.sub("", l) for l in pet.cell(12, long)]
+        self.assertEqual((len(cell[6]), len(cell[7])), (pet.CW, pet.CW))
+        self.assertEqual(cell[6].strip(), "12 " + "p" * 14 + "…")  # each line is cut to the column on its own, one column free
+        self.assertTrue(cell[7].strip().endswith("…") and len(cell[7].strip()) == pet.CW - 1)
+
+    THREE = json.dumps(dict(v=1, ts=NOW - 5, event="task.merged", task="a-three", via="pr")) + "\n"
+
+    def ledger(self, *recs, raw=""):
+        with open(os.path.join(self.h.state, "fleet-ledger.jsonl"), "a") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in recs) + raw)
+
+    def test_ledger_merges_pr_and_local_and_junk(self):
+        pet_ = pet.Pet(self.h.root)
+        self.assertEqual(pet_.poll(NOW), [])  # no ledger file yet
+        self.assertEqual(pet_.trophies, [])
+        self.ledger(dict(v=1, ts=NOW - 50, event="task.dispatched", task="a-one", project="/x/projects/alpha"),
+                    dict(v=1, ts=NOW - 40, event="task.merged", task="a-one", via="pr", pr="https://x/pull/1"),
+                    dict(v=1, ts=NOW - 30, event="task.merged", task="a-two", via="local", extra=[1]),
+                    dict(v=1, ts=NOW - 20, event="task.future", task="a-one"), dict(ts="x", event="task.merged", task="bad"),
+                    dict(v=1, ts=NOW - 40, event="task.merged", task="a-one", via="pr"),  # a repeated record is one trophy
+                    raw="\nnot json\n[1]\n" + self.THREE[:20])  # blank, malformed, non-object, then a half-written last line
+        pet_.poll(NOW)
+        self.assertEqual([t[:2] for t in pet_.trophies], [("alpha", "one"), (None, "a two")])
+        self.ledger(raw=self.THREE[20:])  # the line is completed later: now it counts
+        pet_.poll(NOW + 3)
+        self.assertEqual(len(pet_.trophies), 3)
+        off = pet_.ledger.off
+        pet_.poll(NOW + 6)
+        self.assertEqual(pet_.ledger.off, off)  # only new bytes are read
+        fresh = pet.Pet(self.h.root)
+        fresh.poll(NOW)
+        self.assertEqual(len(fresh.trophies), 3)  # persists across restarts
+        open(os.path.join(self.h.state, "fleet-ledger.jsonl"), "w").close()  # truncated: start over
+        pet_.poll(NOW + 9)
+        self.assertEqual(pet_.trophies, [])
+
+    def test_project_lookup_order(self):
+        self.h.worker("m-meta", project="frommeta")
+        self.h.worker("m-both", project="frommeta")
+        self.ledger(dict(v=1, ts=NOW, event="task.dispatched", task="m-both", project="/p/fromledger"),
+                    dict(v=1, ts=NOW, event="task.dispatched", task="m-null", project=None),
+                    *[dict(v=1, ts=NOW, event="task.merged", task=t, via="local") for t in ("m-meta", "m-both", "m-null")])
         p = pet.Pet(self.h.root)
         p.poll(NOW)
-        for wid in (merged, dropped): os.remove(os.path.join(self.h.state, wid + ".meta"))
-        ws = p.poll(NOW + 3)
-        self.assertEqual([(w["id"], w["mood"]) for w in ws], [(merged, "party")])
-        self.assertEqual(p.trophies, [])
-        ws = p.poll(NOW + 3 + pet.PARTY_SECS)
-        self.assertEqual(ws, [])
-        self.assertEqual([t[:2] for t in p.trophies], [("demo", "merge")])
-        self.assertIn("demo · merge", "\n".join(self.plain(pet.render(ws, p.trophies))))
-        self.assertEqual(pet.Pet(self.h.root).trophies, [])  # a fresh process starts with no cups
+        self.assertEqual(sorted(t[:2] for t in p.trophies if t[0]), [("fromledger", "both"), ("frommeta", "meta")])
+        self.assertEqual([t[:2] for t in p.trophies if not t[0]], [(None, "m null")])  # neither: project omitted
+
+    def test_only_todays_merges(self):
+        day = 86400
+        self.ledger(*[dict(v=1, ts=NOW + k * day, event="task.merged", task=n, via="local") for n, k in (("old", -2), ("yest", -1), ("now", 0), ("later", 1))])
+        p = pet.Pet(self.h.root)
+        p.poll(NOW)
+        self.assertEqual([t[1] for t in p.trophies], ["now"])
+        p.poll(NOW + day)
+        self.assertEqual([t[1] for t in p.trophies], ["later"])
+
+    def test_party_on_new_merge_for_a_shown_worker(self):
+        wid = self.h.worker("demo-merge", lines=[f"done [at={NOW}]: PR https://x/pull/1"])
+        self.ledger(dict(v=1, ts=NOW - 900, event="task.merged", task=wid, via="pr"))  # backlog at startup: no party
+        p = pet.Pet(self.h.root)
+        self.assertEqual(p.poll(NOW)[0]["mood"], "calling")
+        self.ledger(dict(v=1, ts=NOW, event="task.merged", task=wid, via="pr"), dict(v=1, ts=NOW, event="task.merged", task="gone-one", via="local"))
+        w = p.poll(NOW + 3)[0]
+        self.assertEqual((w["mood"], w["sub"], w["bubble"]), ("party", "merged!", ""))
+        self.assertEqual(p.poll(NOW + 3 + pet.PARTY_SECS - 1)[0]["mood"], "party")
+        self.assertEqual(p.poll(NOW + 3 + pet.PARTY_SECS)[0]["mood"], "calling")  # the party ends; the cup is already in the column
+        self.assertEqual(len(p.trophies), 3)
+
+    def test_trophy_column(self):
+        items = [("p", f"t{i}", "12:00") for i in range(30)]
+        col = [pet.TAG.sub("", l) for l in pet.trophy_col(items, 6)]
+        self.assertEqual(len(col), 6)
+        self.assertTrue(all(len(l) == pet.TW for l in col))
+        self.assertIn("t29", col[1])  # newest on top
+        self.assertIn("t26", col[4])
+        self.assertIn("+26 more", col[5])
+        self.assertIn("none yet today", pet.TAG.sub("", "".join(pet.trophy_col([], 4))))
+        self.assertNotIn("more", "".join(pet.TAG.sub("", l) for l in pet.trophy_col(items[:5], 6)))  # exactly fits: no overflow line
 
     def test_sprites_match_the_agreed_mochi(self):
         # crc32 of every mood x colour x accessory (frame 0) as drawn by the approved design (herdr-pet-tamagotchi-alts/build.py),
@@ -204,7 +275,8 @@ class MainMochi(unittest.TestCase):
         lines = pet.render(ws, [])
         self.assertIn(pet.center(pet.creature("busy", "collar", pet.MAIN)[2], pet.CW), "\n".join(lines))
         out = "\n".join(pet.TAG.sub("", l) for l in lines)
-        self.assertIn("1 main · firstmate", out)
+        self.assertIn("1 main", out)
+        self.assertIn("firstmate", out)
         self.assertIn("main session", out)
         self.assertTrue(all(pet.vis(l) == pet.W for l in lines))
 
@@ -224,7 +296,8 @@ class MainMochi(unittest.TestCase):
         self.assertEqual(len(ws), 9)
         out = [pet.TAG.sub("", l) for l in pet.render_strip(ws, [])]
         self.assertIn("+1 more", out[0])
-        self.assertIn("8 demo · t6", "\n".join(out))
+        self.assertIn("8 demo", "\n".join(out))
+        self.assertIn("t6", "\n".join(out))
         self.assertNotIn("t7", "\n".join(out))
         self.assertEqual(len(out), pet.strip_rows(9))
 
@@ -244,31 +317,36 @@ class Strip(unittest.TestCase):
     def test_strip_draws_mochi(self):
         for i in range(10): self.h.worker(f"demo-t{i}", lines=[f"needs-decision [at={NOW}]: A or B"], born=NOW - 600 + i)
         p = pet.Pet(self.h.root)
-        p.trophies = [("demo", f"cup{i}", "12:0" + str(i)) for i in range(9)]
+        p.trophies = [("demo", f"cup{i}", "12:0" + str(i)) for i in range(60)]
         ws = p.poll(NOW)
+        p.trophies = [("demo", f"cup{i}", "12:0" + str(i)) for i in range(60)]
         self.assertEqual(len(pet.draw(ws, p.trophies, pet.STRIP_ROWS)), pet.STRIP_ROWS)  # a short pane clips, never scrolls
-        rows = pet.STRIP_ROWS + pet.CH  # eight Mochis: two rows of four
+        rows = pet.strip_rows(len(ws))  # eight Mochis, two across: four rows
         lines = pet.draw(ws, p.trophies, rows)
         out = self.plain(lines)
-        self.assertEqual(len(out), rows)
+        self.assertEqual((len(out), rows), (2 + 4 * pet.CH, pet.STRIP_ROWS + 3 * pet.CH))
         self.assertTrue(all(len(l) == pet.W for l in out), [len(l) for l in out])
         self.assertIn("+2 more", out[0])
+        self.assertIn("q close", out[0])
         sprite = pet.creature("calling", ws[1]["acc"], pet.colour_of("demo"))
         self.assertIn(pet.center(sprite[2], pet.CW), lines[3])  # the real sprite, not a face
-        self.assertIn("4 demo · t3", out[7])
-        self.assertIn("calling", out[8])
-        self.assertIn("●●●●●", out[9])
-        self.assertIn('"your call!"', out[10])
-        self.assertIn("8 demo · t7", out[17])
-        self.assertIn("demo · cup8 12:08", out[21])  # newest cup first
-        self.assertIn("earlier", out[21])
-        self.assertIn("q close", out[21])
+        self.assertIn("2 demo", out[7])  # project on its own line, the task under it
+        self.assertIn("t1", out[8])
+        self.assertIn("calling", out[9])
+        self.assertIn("●●●●●", out[10])
+        self.assertIn('"your call!"', out[11])
+        self.assertIn("7 demo", out[1 + 3 * pet.CH + 6])
+        self.assertIn("trophies · today", out[1])
+        self.assertIn("◆ demo · cup59", out[2])  # newest on top, one per row
+        self.assertIn("◆ demo · cup58", out[3])
+        self.assertIn("+18 more", out[-2])  # overflow on the last row
+        self.assertTrue(all(o[-pet.TW - 1] == "│" for o in out[1:-1]))  # the column sits at the right edge
 
     def test_strip_empty(self):
         out = self.plain(pet.render_strip([], []))
         self.assertEqual(len(out), pet.STRIP_ROWS)
         self.assertIn("no workers aboard", "\n".join(out))
-        self.assertIn("none yet", out[-2])
+        self.assertIn("none yet today", out[2])
         self.assertTrue(all(len(l) == pet.W for l in out))
 
 class Pin(unittest.TestCase):

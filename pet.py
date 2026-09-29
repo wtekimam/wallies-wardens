@@ -4,6 +4,7 @@
 Read-only view of a Firstmate home. The main session's mood is the agent_status of the Herdr pane whose cwd is the home
 (`herdr pane list`, once per poll). Per worker it reads only state/<id>.meta, the tail of
 state/<id>.status, the mtime of state/<id>.turn-ended and the mtime of state/<id>.inbox/handled/.
+Trophies come from state/fleet-ledger.jsonl (read by byte offset, only new lines each poll).
 It never writes under the Firstmate home and never runs Firstmate scripts.
 
   python3 pet.py            live pane: read status every 3s, animate about twice a second, redraw only changed lines
@@ -12,12 +13,12 @@ It never writes under the Firstmate home and never runs Firstmate scripts.
 
 PET_ANIMATE=0 (environment, or a line in the plugin config file) keeps the Mochis still.
 """
-import functools, math, os, re, sys, time, zlib
+import functools, json, math, os, re, sys, time, zlib
 
 POLL = 3                 # seconds between polls
 ASLEEP_SECS = 30 * 60    # no status or turn activity this long (and not calling) -> asleep
 HUNGER_STEP = 10 * 60    # one heart lost per this long spent calling without a new message
-PARTY_SECS = 30          # how long a merged worker parties before its cup lands in the trophy row
+PARTY_SECS = 30          # how long a worker parties after a merge record for it arrives
 ANIM = 0.5               # seconds between animation frames (status files are still read every POLL)
 SHOWN = 8                # creatures on screen; the rest become "+N more"
 DEFAULT_HOME = os.path.expanduser("~/Documents/firstmate")
@@ -245,7 +246,7 @@ def read_worker(state_dir, wid, now):
     project = os.path.basename(meta.get("project", "").rstrip("/")) or "?"
     return dict(id=wid, project=project, kind=kind, mood=mood, bubble=bubble, sub=sub, born=born,
                 age=age(now - born), hunger=hunger, hn=hn, ws=meta.get("herdr_workspace_id"), tab=meta.get("herdr_tab_id"),
-                pane=meta.get("herdr_pane_id"), merge_ready=mood == "party" or (mood == "calling" and kind != "scout" and st == "done"))
+                pane=meta.get("herdr_pane_id"))
 
 def age(secs):
     m = int(secs // 60)
@@ -261,14 +262,58 @@ MAIN_MOOD = dict(working=("busy", "", "working"), blocked=("calling", "needs you
 def main_worker(p):
     mood, bubble, sub = MAIN_MOOD.get(p.get("agent_status"), ("asleep", "", "idle"))
     return dict(id="firstmate", project="main", kind="main", main=True, mood=mood, bubble=bubble, sub=sub, born=0, age="main", hunger=None,
-                hn="main session", acc="collar", colour=MAIN, ws=p.get("workspace_id"), tab=p.get("tab_id"), pane=p.get("pane_id"), merge_ready=False)
+                hn="main session", acc="collar", colour=MAIN, ws=p.get("workspace_id"), tab=p.get("tab_id"), pane=p.get("pane_id"))
 
-# ---- the pet: keeps accessories stable, parties merged workers and keeps their cups (process memory only) ----
+# ---- the fleet ledger: every task.merged record is one trophy ----
+class Ledger:
+    """Read-only tail of state/fleet-ledger.jsonl. Keeps a byte offset, so each read parses only the lines appended since the last."""
+    def __init__(self, state):
+        self.state, self.path = state, os.path.join(state, "fleet-ledger.jsonl")
+        self.reset()
+
+    def reset(self): self.off, self.projects, self.merged, self.keys = 0, {}, [], set()  # merged: dicts of task, ts, project
+
+    def meta_project(self, task):
+        try: return os.path.basename(read_meta(os.path.join(self.state, task + ".meta")).get("project", "").rstrip("/")) or None
+        except OSError: return None
+
+    def read(self):  # -> the merge records that arrived since the last read; a missing file is just empty
+        try: size = os.stat(self.path).st_size
+        except OSError: size = 0
+        if size < self.off: self.reset()  # truncated (the contract's way to empty it): start over
+        if size == self.off: return []
+        try:
+            with open(self.path, "rb") as f: f.seek(self.off); data = f.read(size - self.off)
+        except OSError: return []
+        cut = data.rfind(b"\n") + 1  # a half-written last line waits for its newline
+        self.off += cut
+        new = []
+        for line in data[:cut].split(b"\n"):
+            try: rec = json.loads(line)
+            except ValueError: continue  # blank or malformed
+            task, ts, ev = (rec.get(k) for k in ("task", "ts", "event")) if isinstance(rec, dict) else (None, None, None)
+            if not isinstance(task, str) or not isinstance(ts, (int, float)) or isinstance(ts, bool): continue
+            if ev == "task.dispatched":
+                proj = rec.get("project")
+                if isinstance(proj, str) and os.path.basename(proj.rstrip("/")): self.projects[task] = os.path.basename(proj.rstrip("/"))
+            elif ev == "task.merged" and (task, ts) not in self.keys:  # the ledger can repeat a record
+                self.keys.add((task, ts))
+                new.append(dict(task=task, ts=ts, project=self.projects.get(task) or self.meta_project(task)))
+        self.merged += new
+        return new
+
+def trophies_today(merged, now):  # -> [(project or None, task, "HH:MM")], most recent last
+    day = time.strftime("%Y-%m-%d", time.localtime(now))
+    return [(m["project"], short_task(m["task"], m["project"] or ""), time.strftime("%H:%M", time.localtime(m["ts"])))
+            for m in sorted(merged, key=lambda m: m["ts"]) if time.strftime("%Y-%m-%d", time.localtime(m["ts"])) == day]
+
+# ---- the pet: keeps accessories stable, parties workers whose merge just got recorded, lists today's trophies ----
 class Pet:
     def __init__(self, home, list_panes=None):  # list_panes() -> Herdr's pane list; None (no Herdr) means no main Mochi
         self.home, self.list_panes = home, list_panes
         self.state = os.path.join(home, "state")
-        self.accs, self.seen, self.ghosts, self.trophies = {}, {}, [], []
+        self.ledger = Ledger(self.state)
+        self.accs, self.party, self.trophies, self.primed = {}, {}, [], False
 
     def poll(self, now):
         try: ids = sorted(e.name[:-5] for e in os.scandir(self.state) if e.name.endswith(".meta"))
@@ -285,14 +330,14 @@ class Pet:
                 taken = [a for k, a in self.accs.items() if live[k] == w["project"]]
                 self.accs[w["id"]] = next((a for a in ACCS if a not in taken), ACCS[len(taken) % len(ACCS)])
             w["acc"] = self.accs[w["id"]]
-        for wid, w in self.seen.items():  # record gone: a merge-ready worker was torn down after landing
-            if wid not in live and w["merge_ready"]:
-                self.ghosts.append({**w, "mood": "party", "bubble": "", "sub": "merged!", "gone": now})
-        self.seen = {w["id"]: w for w in workers}
-        for g in [g for g in self.ghosts if now - g["gone"] >= PARTY_SECS]:
-            self.ghosts.remove(g)
-            self.trophies.append((g["project"], short_task(g["id"], g["project"]), time.strftime("%H:%M", time.localtime(g["gone"]))))
-        return self.main_mochi(now) + workers + self.ghosts
+        for m in self.ledger.read():  # a merge that lands while the worker is still shown: party (the backlog read at startup does not)
+            if self.primed and m["task"] in live: self.party[m["task"]] = now + PARTY_SECS
+        self.primed = True
+        self.party = {k: t for k, t in self.party.items() if t > now and k in live}
+        for w in workers:
+            if w["id"] in self.party: w.update(mood="party", bubble="", sub="merged!", hunger=5, hn="fed")
+        self.trophies = trophies_today(self.ledger.merged, now)
+        return self.main_mochi(now) + workers
 
     def main_mochi(self, now):  # the Firstmate session's own pane, if Herdr has one; any Herdr trouble means none
         if not self.list_panes: return []
@@ -301,12 +346,12 @@ class Pet:
         return [main_worker(p)] if p else []
 
 # ---- layout: 80 columns, wider when the pane fits more cells ----
-W, CW, CH = 80, 19, 10  # minimum frame width; one creature cell's width and height
+W, CW, CH, TW = 80, 19, 11, 24  # minimum frame width; one creature cell's width and height; the trophy column's width
 MC = dict(busy="7dcfff", training="ff9e64", calling="bb9af7", sick="9ece6a", asleep="7d8fd0", party="e0af68")
 
-def grid(n, width=W):  # -> (columns, rows of creatures, frame width): as many cells across as fit, never fewer than four
-    cols = min(SHOWN, (max(width, W) - 4) // CW)
-    return cols, max(1, math.ceil(min(n, SHOWN) / cols)), max(W, cols * CW + 4)
+def grid(n, width=W):  # -> (columns, rows of creatures, frame width): as many cells across as fit beside the trophy column
+    cols = max(1, min(SHOWN, (max(width, W) - 4 - TW) // CW))
+    return cols, max(1, math.ceil(min(n, SHOWN) / cols)), max(W, cols * CW + 4 + TW)
 
 def frame(title, rows, right="", w=W):
     inner = w - 2
@@ -317,45 +362,50 @@ def frame(title, rows, right="", w=W):
 def hearts(n): return c("f7768e", "●" * n) + c(DIM, "○" * (5 - n))  # ● is solid in every terminal font; ♥ drew as an outline in Herdr
 
 def cell(i, w, tick=None):  # tick None: the still frame
-    proj = clip(w["project"], 8)
-    task = clip(short_task(w["id"], w["project"]), CW - 3 - len(proj) - 3)  # one column left free between cells
-    label = c("e0af68", str(i), True) + " " + c(FG, proj, True) + c(DIM, " · ") + c("a9b1d6", task)
+    n = f"{i} "  # one column of each line stays free between cells
+    proj = c("e0af68", str(i), True) + " " + c(FG, clip(w["project"], CW - 1 - len(n)), True)
+    task = c("a9b1d6", clip(short_task(w["id"], w["project"]), CW - 1))
     last = c("ffffff", f'"{w["bubble"]}"', True) if w["bubble"] else c(DIM, w["sub"])
     f = 0 if tick is None else ((tick // 2 if w["mood"] == "asleep" else tick) + i) % 2  # neighbours out of step; asleep at half speed
     body = creature(w["mood"], w.get("acc"), w.get("colour", colour_of(w["project"])), f)
-    return [center(x, CW) for x in body] + [center(label, CW), center(c(MC[w["mood"]], w["mood"]) + c(DIM, f" · {w['age']}"), CW),
+    return [center(x, CW) for x in body] + [center(proj, CW), center(task, CW), center(c(MC[w["mood"]], w["mood"]) + c(DIM, f" · {w['age']}"), CW),
             center(c(DIM, w["hn"]) if w["hunger"] is None else hearts(w["hunger"]) + c(DIM, " " + w["hn"]), CW), center(last, CW)]
 
-def trophy_rows(items):
-    head = " " + c("f7d774", "trophies · this session", True)
-    if not items: return ["", head + c(DIM, "   none yet: merge a PR and your pet leaves one here"), ""]
-    shown, more = items[-3:], len(items) - 3
-    cells = [[" " + CUP[0] + " " + c(FG, clip(p, 10), True) + c(DIM, " · ") + c("a9b1d6", clip(t, 11)),
-              " " + CUP[1] + " " + c(DIM, f"merged {tm}")] for p, t, tm in shown]
-    tag = c(DIM, f"   +{more} earlier") if more > 0 else ""
-    return [head + tag] + ["".join(padr(cl[i], 26) for cl in cells) for i in range(2)]
+def trophy_name(p, t, pw, tw): return f"{clip(p, pw)} · {clip(t, tw)}" if p else clip(t, pw + 3 + tw)
 
-def panel(workers, rows, w=W):
+def trophy_col(items, h):  # -> h lines of TW columns, newest on top: a heading, one trophy per line, "+N more" when they overflow
+    lines = [c(FRAME, "│ ") + c("f7d774", "trophies · today", True)]
+    if not items: lines.append(c(FRAME, "│ ") + c(DIM, "none yet today"))
+    room = h - 1
+    shown = list(reversed(items))[:room if len(items) <= room else room - 1]
+    lines += [c(FRAME, "│ ") + c("f7d774", "◆ ") + c(FG, trophy_name(p, t, 8, 9)) for p, t, _ in shown]
+    if len(shown) < len(items): lines.append(c(FRAME, "│ ") + c(DIM, f"+{len(items) - len(shown)} more"))
+    return [padr(l, TW) for l in (lines + [c(FRAME, "│")] * h)[:h]]
+
+def panel(workers, rows, w=W, keys=""):
     more = len(workers) - SHOWN
     n = sum(not w.get("main") for w in workers)
-    right = (c("e0af68", f"+{more} more", True) + c(DIM, " · ") if more > 0 else "") + c("9ece6a", "●") + c(DIM, f" live {POLL}s")
+    right = (c("e0af68", f"+{more} more", True) + c(DIM, " · ") if more > 0 else "") + c("9ece6a", "●") + c(DIM, f" live {POLL}s") + keys
     return frame(f"herdr pet · {n} worker{'s' if n != 1 else ''}", rows, right, w)
 
-def creatures(shown, width=W, tick=None):  # up to eight Mochis, as many across as fit, CH rows each: sprite, label, mood, hearts, bubble
-    cols, _, w = grid(len(shown), width)
-    if not shown: return [""] * 4 + [center(c(DIM, "no workers aboard · Mochi waits for the next task"), w - 2)] + [""] * 5
-    cells = [cell(i, x, tick) for i, x in enumerate(shown, 1)]
-    return ["  " + "".join(col[i] for col in cells[k:k + cols]) for k in range(0, len(cells), cols) for i in range(CH)]
+def creatures(shown, trophies, width=W, tick=None):  # up to eight Mochis, as many across as fit, CH rows each: sprite, two label lines, mood, hearts, bubble; trophies down the right edge
+    cols, nrows, w = grid(len(shown), width)
+    room = w - 2 - TW
+    if not shown: body = [""] * 5 + [center(c(DIM, "no workers aboard · Mochi waits for the next task"), room)] + [""] * 5
+    else:
+        cells = [cell(i, x, tick) for i, x in enumerate(shown, 1)]
+        body = ["  " + "".join(col[i] for col in cells[k:k + cols]) for k in range(0, len(cells), cols) for i in range(CH)]
+    return [padr(l, room) + t for l, t in zip(body, trophy_col(trophies, len(body)))]
 
 def render(workers, trophies, width=W, tick=None):
     shown, w = workers[:SHOWN], grid(len(workers), width)[2]
     sep = c(FRAME, " " + "─" * (w - 4))
-    rows = [""] + creatures(shown, width, tick) + [sep] + trophy_rows(trophies) + [sep, " " + c("e0af68", "r") + c(DIM, " redraw  ") + c("e0af68", "q") + c(DIM, " close")]
+    rows = [""] + creatures(shown, trophies, width, tick) + [sep, " " + c("e0af68", "r") + c(DIM, " redraw  ") + c("e0af68", "q") + c(DIM, " close")]
     return panel(workers, rows, w)
 
-# ---- strip layout: the same Mochi rows, trophies and keys on one line, for the pinned strip ----
-FULL_ROWS = 19   # the full panel's height with one row of creatures; anything shorter gets the strip
-STRIP_ROWS = 13  # the strip's height with one row of creatures: frame, the creature row, one trophy line
+# ---- strip layout: the same Mochi rows and trophy column without the spacing rows, for the pinned strip ----
+FULL_ROWS = 16   # the full panel's height with one row of creatures; anything shorter gets the strip
+STRIP_ROWS = 13  # the strip's height with one row of creatures: frame and the creature row
 
 def full_rows(n, width=W): return FULL_ROWS + CH * (grid(n, width)[1] - 1)
 def strip_rows(n, width=W): return STRIP_ROWS + CH * (grid(n, width)[1] - 1)  # a second row of creatures grows the strip
@@ -363,16 +413,7 @@ def layout_for(rows, n=0, width=W): return "full" if rows >= full_rows(n, width)
 
 def render_strip(workers, trophies, width=W, tick=None):
     shown, w = workers[:SHOWN], grid(len(workers), width)[2]
-    keys_txt = c("e0af68", "q") + c(DIM, " close")
-    room = w - 2 - vis(keys_txt) - 1 - len(" trophies ")
-    cups = []
-    for k, (p, t, tm) in enumerate(reversed(trophies), 1):  # newest first, as many as fit
-        item = f"{clip(p, 8)} · {clip(t, 8)} {tm}"
-        if len("  ".join(cups + [item])) + (len(f"  +{len(trophies)} earlier") if k < len(trophies) else 0) > room: break
-        cups.append(item)
-    tro = " ".join([c("f7d774", " trophies", True), c(FG, "  ".join(cups)) if cups else c(DIM, "none yet")] +
-                   [c(DIM, f" +{len(trophies) - len(cups)} earlier")] * (len(trophies) > len(cups)))
-    return panel(workers, creatures(shown, width, tick) + [padr(tro, w - 2 - vis(keys_txt) - 1) + keys_txt + " "], w)
+    return panel(workers, creatures(shown, trophies, width, tick), w, c(DIM, " · ") + c("e0af68", "q") + c(DIM, " close"))
 
 def draw(workers, trophies, rows, width=W, tick=None):  # -> lines for a terminal this size; never more lines than fit (that would scroll)
     lay = render if layout_for(rows, len(workers), width) == "full" else render_strip

@@ -3,7 +3,7 @@
 A Herdr pane that shows each Firstmate worker, and the main Firstmate session, as Mochi, a small amber cat-eared critter.
 It opens by itself as a strip at the top of the Firstmate tab, and as a full popup on demand.
 Each Mochi shows its worker's mood with a small idle animation, gets hungry while it waits on you,
-and leaves a gold cup in a trophy row after its PR lands.
+and leaves a gold cup in a trophy column at the right edge for every merge Firstmate records.
 
 Plain python3 (stdlib only) with no dependencies. It makes no network calls and writes nothing.
 
@@ -32,8 +32,8 @@ A `[[startup]]` hook runs `pet.py --pin` once each time Herdr starts, after it r
    With no such pane, it uses the focused pane of the active tab.
    Herdr only splits right or down, so it then swaps the two panes (`herdr pane swap`) to put the pet on top.
 3. It opens without focus. A swap focuses a pane, so `--pin` puts focus back where it was: the same pane, or your other tab or workspace.
-   It then sizes the strip to 13 rows, not counting pane borders, or 23 when the workers need a second row of Mochis.
-   After that the strip resizes itself: it grows when a second row appears and shrinks back when it goes (`herdr pane resize` on its own pane).
+   It then sizes the strip to 13 rows, not counting pane borders, plus 11 for each further row of Mochis (24 for a second row).
+   After that the strip resizes itself: it grows when a row appears and shrinks back when one goes (`herdr pane resize` on its own pane).
    A strip you resize by hand is left alone until the number of rows changes again.
 
 To close the strip, press `q` in it. It comes back on the next Herdr start.
@@ -43,11 +43,14 @@ It can't live inside Herdr's agents sidebar.
 Herdr plugins can only open terminal panes (overlay, popup, split, tab or zoomed) and can't draw in the sidebar.
 A tiled strip on top of the Firstmate tab is the closest fit.
 
-**Layout:** up to eight Mochis, as many across as the pane is wide (four at 80 columns, eight at 156), wrapping to a second row.
+**Layout:** up to eight Mochis, as many across as fit beside the trophy column (two at 80 columns, six at 156, eight at 180), wrapping to more rows.
 Any more workers show as `+N more` in the title.
-When the pane is too short for the full panel (19 rows, or 29 with a second row of Mochis), the pet draws the strip:
-the same Mochis, each with its label, mood, hearts and bubble, and the trophies and keys on one line.
-The strip needs 13 rows, or 23 with a second row. It redraws when the pane is resized.
+Each Mochi has a two-line label: `N project` (`1 main` for the main session), then the task or session name.
+Each line is centred and cut to the column width on its own.
+The trophy column (24 columns wide) sits at the right edge, one trophy per row, newest on top, with `+N more` when they don't fit.
+When the pane is too short for the full panel (16 rows, plus 11 per further row of Mochis), the pet draws the strip:
+the same Mochis and trophy column, with `q close` in the title bar.
+The strip needs 13 rows, plus 11 per further row. It redraws when the pane is resized.
 
 ## Config
 
@@ -77,6 +80,9 @@ Every 3 seconds, for each `state/<id>.meta` in the Firstmate home, it reads:
 - `state/<id>.meta`: project, kind, spawn time, Herdr ids
 - the last 8 KB of `state/<id>.status`
 - the mtime of `state/<id>.turn-ended` and of `state/<id>.inbox/handled/`
+- `state/fleet-ledger.jsonl`, for trophies (see below). It remembers a byte offset, so each poll parses only the lines appended since the last, and it stops at a half-written last line until its newline arrives.
+  A missing file, blank or malformed lines, and unknown events or members are ignored.
+  A truncated file starts the trophies over.
 
 For the main session it reads the `agent_status` of the Herdr pane whose cwd is the Firstmate home, from `herdr pane list` (once every 3 seconds, the same poll).
 
@@ -99,9 +105,9 @@ Status files are read every 3 seconds whether or not the Mochis animate. Between
 | calling | `needs-decision`, or `done` | `"your call!"`, `"PR ready!"`, `"report ready!"` (scout) |
 | sick | `blocked` / `failed` | blocked / failed |
 | asleep | busy or training with no status or turn activity for 30 min | silent 45m |
-| party | `done` line says merged/landed, or the record of a PR-ready worker is removed | merged! |
+| party | `done` line says merged/landed, or a merge record for it arrives in the ledger (30 s) | merged! |
 
-**Main session:** one extra Mochi, always first, labelled `main · firstmate`. It shows only while Herdr has a pane whose cwd is the Firstmate home; with none (or without Herdr, or `--once` outside it) there is no main Mochi and no error. It counts toward the eight.
+**Main session:** one extra Mochi, always first, labelled `1 main` over `firstmate`. It shows only while Herdr has a pane whose cwd is the Firstmate home; with none (or without Herdr, or `--once` outside it) there is no main Mochi and no error. It counts toward the eight.
 Its mood comes from that pane's `agent_status`, not from status files:
 
 | `agent_status` | mood | text under the label |
@@ -121,7 +127,12 @@ Every worker wears an accessory, given in this order within its project: collar,
 A worker keeps its accessory, and a newcomer takes the first one free in its project.
 The collar is cyan, except on a teal Mochi, where it is red so it shows.
 
-**Trophies:** when the record of a PR-ready (or merged) worker disappears, its Mochi parties for 30 seconds. Then it leaves a gold cup labelled `project · task`. Cups live only in the pane's memory, so closing the pane or restarting the session clears them.
+**Trophies:** every `task.merged` record in the Firstmate home's fleet activity ledger (`state/fleet-ledger.jsonl`) is one gold cup, labelled `project · task`, whether the PR merged on GitHub or a local-only branch landed.
+The project comes from the task's `task.dispatched` record, else the `project=` basename in `state/<id>.meta`, else it is left out.
+The column shows today's merges only (local day of the record's `ts`), newest on top. Cups come from the file, so closing the pane or restarting keeps them.
+When a merge record arrives for a Mochi that is still shown, it parties for 30 seconds. Records already in the file at startup, or for a Mochi that is gone, don't party.
+A merge only counts when Firstmate records it and the ledger is on for that home (the `config/fleet-ledger` flag, see Firstmate's `docs/fleet-ledger.md`). With the flag off there are no cups.
+A repeated record for the same task and time counts once.
 
 ## Test
 
