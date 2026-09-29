@@ -220,11 +220,13 @@ class Panel(unittest.TestCase):
         col = [pet.TAG.sub("", l) for l in pet.trophy_col(items, 6)]
         self.assertEqual(len(col), 6)
         self.assertTrue(all(len(l) == pet.TW for l in col))
-        self.assertIn("t29", col[1])  # newest on top
-        self.assertIn("t26", col[4])
-        self.assertIn("+26 more", col[5])
+        self.assertIn("t29", col[1])  # newest on top, cup line
+        self.assertIn("merged 12:00", col[2])  # cup bottom line for t29
+        self.assertIn("t28", col[3])  # second trophy
+        self.assertIn("+28 more", col[5])  # overflow: 30 total, 2 shown
         self.assertIn("none yet today", pet.TAG.sub("", "".join(pet.trophy_col([], 4))))
-        self.assertNotIn("more", "".join(pet.TAG.sub("", l) for l in pet.trophy_col(items[:5], 6)))  # exactly fits: no overflow line
+        out = "".join(pet.TAG.sub("", l) for l in pet.trophy_col(items[:2], 6))
+        self.assertNotIn("more", out)  # 2 items fit: 1 heading + 2 trophy lines + padding
 
     def test_sprites_match_the_agreed_mochi(self):
         # crc32 of every mood x colour x accessory (frame 0) as drawn by the approved design (herdr-pet-tamagotchi-alts/build.py),
@@ -337,9 +339,12 @@ class Strip(unittest.TestCase):
         self.assertIn('"your call!"', out[11])
         self.assertIn("7 demo", out[1 + 3 * pet.CH + 6])
         self.assertIn("trophies · today", out[1])
-        self.assertIn("◆ demo · cup59", out[2])  # newest on top, one per row
-        self.assertIn("◆ demo · cup58", out[3])
-        self.assertIn("+18 more", out[-2])  # overflow on the last row
+        self.assertIn("demo · cup59", out[2])  # newest on top, cup top line
+        self.assertIn("merged", out[3])  # cup bottom line
+        self.assertIn("demo · cup58", out[4])  # next trophy
+        # Trophy column gets len(body) lines where body is creature rows; 8 workers in 2 cols x 4 rows = 44 lines
+        # 44 lines = heading + 21 trophies (42 lines) + overflow = 44 lines, leaves 39 more (60 - 21 = 39)
+        self.assertIn("+39 more", "".join(out))  # overflow visible in the full output
         self.assertTrue(all(o[-pet.TW - 1] == "│" for o in out[1:-1]))  # the column sits at the right edge
 
     def test_strip_empty(self):

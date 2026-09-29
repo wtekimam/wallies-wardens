@@ -373,13 +373,18 @@ def cell(i, w, tick=None):  # tick None: the still frame
 
 def trophy_name(p, t, pw, tw): return f"{clip(p, pw)} · {clip(t, tw)}" if p else clip(t, pw + 3 + tw)
 
-def trophy_col(items, h):  # -> h lines of TW columns, newest on top: a heading, one trophy per line, "+N more" when they overflow
+def trophy_col(items, h):  # -> h lines of TW columns, newest on top: a heading, cup per trophy on 2 lines, "+N more" when they overflow
     lines = [c(FRAME, "│ ") + c("f7d774", "trophies · today", True)]
-    if not items: lines.append(c(FRAME, "│ ") + c(DIM, "none yet today"))
-    room = h - 1
-    shown = list(reversed(items))[:room if len(items) <= room else room - 1]
-    lines += [c(FRAME, "│ ") + c("f7d774", "◆ ") + c(FG, trophy_name(p, t, 8, 9)) for p, t, _ in shown]
-    if len(shown) < len(items): lines.append(c(FRAME, "│ ") + c(DIM, f"+{len(items) - len(shown)} more"))
+    if not items:
+        lines.append(c(FRAME, "│ ") + c(DIM, "none yet today"))
+        return [padr(l, TW) for l in (lines + [c(FRAME, "│")] * h)[:h]]
+    shown = list(reversed(items))[:(h - 1) // 2]  # newest first; (h-1)//2 trophies fit in h-1 lines (heading + trophy pairs + potential overflow)
+    for p, t, tm in shown:
+        trophy_text = trophy_name(p, t, 8, 9) if p else t
+        lines.append(c(FRAME, "│") + c("f7d774", " " + CUP[0]) + " " + c(FG, clip(trophy_text, TW - 8)))
+        lines.append(c(FRAME, "│") + c("f7d774", " " + CUP[1]) + " " + c(DIM, f"merged {tm}"))
+    if len(shown) < len(items):
+        lines.append(c(FRAME, "│ ") + c(DIM, f"+{len(items) - len(shown)} more"))
     return [padr(l, TW) for l in (lines + [c(FRAME, "│")] * h)[:h]]
 
 def panel(workers, rows, w=W, keys=""):
