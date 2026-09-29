@@ -1,0 +1,14 @@
+id = "firstmate.pet"
+name = "Firstmate Pet"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "One Mochi per Firstmate worker: mood, growth, hunger and a session trophy row"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "pet"
+title = "Firstmate Pet"
+placement = "popup"
+width = 84
+height = 24
+command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/pet.py\""]
