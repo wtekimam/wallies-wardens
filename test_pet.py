@@ -176,6 +176,58 @@ class Panel(unittest.TestCase):
         self.assertIn("demo", out)
         self.assertIn("busy", out)
 
+    def test_hearts_solid_and_hollow(self):
+        h = self.plain([pet.hearts(3)])[0]
+        self.assertEqual((h, pet.vis(pet.hearts(3))), ("●●●○○", 5))
+        self.assertNotIn("♥", pet.hearts(5))
+
+class MainMochi(unittest.TestCase):
+    def setUp(self): self.h = Home()
+    def tearDown(self): self.h.tmp.cleanup()
+
+    def pet(self, status="working", cwd=None, n=0):
+        for i in range(n): self.h.worker(f"demo-t{i}", lines=[f"working [at={NOW}]: go"], born=NOW - 600 + i)
+        panes = [dict(pane_id="w1:p9", cwd="/elsewhere", agent_status="working"),
+                 dict(pane_id="w1:p1", cwd=cwd or self.h.root, agent_status=status, workspace_id="w1", tab_id="w1:t1")]
+        return pet.Pet(self.h.root, lambda: panes)
+
+    def test_first_and_own_colour(self):
+        ws = self.pet(n=2).poll(NOW)
+        self.assertEqual([w["id"] for w in ws], ["firstmate", "demo-t0", "demo-t1"])
+        m = ws[0]
+        self.assertEqual((m["colour"], m["acc"], m["hunger"]), (pet.MAIN, "collar", None))
+        self.assertNotIn(pet.MAIN, {pet.colour_of(p) for p in ("demo", "kara-website", "x", "y")})  # never a project colour
+        self.assertEqual(pet.colour_of("anything") < len(pet.PROJECT_PALS), True)
+        self.assertNotIn(pet.PALS[pet.MAIN]["B"], [p["B"] for p in pet.PROJECT_PALS])
+        self.assertNotEqual(pet.PALS[pet.MAIN]["L"], pet.PALS[pet.MAIN]["B"])  # collar shows on the body
+        self.assertEqual(pet.focus_cmds(m), [["herdr", "workspace", "focus", "w1"], ["herdr", "tab", "focus", "w1:t1"]])
+        lines = pet.render(ws, [])
+        self.assertIn(pet.center(pet.creature("busy", "collar", pet.MAIN)[2], pet.CW), "\n".join(lines))
+        out = "\n".join(pet.TAG.sub("", l) for l in lines)
+        self.assertIn("1 main · firstmate", out)
+        self.assertIn("main session", out)
+        self.assertTrue(all(pet.vis(l) == pet.W for l in lines))
+
+    def test_absent_without_home_pane_or_herdr(self):
+        self.assertEqual(self.pet(cwd="/elsewhere").poll(NOW), [])
+        self.assertEqual(pet.Pet(self.h.root).poll(NOW), [])  # no Herdr
+        def boom(): raise FileNotFoundError("herdr")
+        self.assertEqual(pet.Pet(self.h.root, boom).poll(NOW), [])  # Herdr gone: never an error
+
+    def test_mood_from_agent_status(self):
+        got = {s: self.pet(s).poll(NOW)[0] for s in ("working", "idle", "blocked", "done", "unknown")}
+        self.assertEqual({s: (w["mood"], w["bubble"]) for s, w in got.items()},
+                         dict(working=("busy", ""), idle=("asleep", ""), blocked=("calling", "needs you!"), done=("asleep", ""), unknown=("asleep", "")))
+
+    def test_counts_toward_eight(self):
+        ws = self.pet(n=8).poll(NOW)
+        self.assertEqual(len(ws), 9)
+        out = [pet.TAG.sub("", l) for l in pet.render_strip(ws, [])]
+        self.assertIn("+1 more", out[0])
+        self.assertIn("8 demo · t6", "\n".join(out))
+        self.assertNotIn("t7", "\n".join(out))
+        self.assertEqual(len(out), pet.strip_rows(9))
+
 class Strip(unittest.TestCase):
     def setUp(self): self.h = Home()
     def tearDown(self): self.h.tmp.cleanup()
@@ -205,7 +257,7 @@ class Strip(unittest.TestCase):
         self.assertIn(pet.center(sprite[2], pet.CW), lines[3])  # the real sprite, not a face
         self.assertIn("4 demo · t3", out[7])
         self.assertIn("calling", out[8])
-        self.assertIn("♥", out[9])
+        self.assertIn("●●●●●", out[9])
         self.assertIn('"your call!"', out[10])
         self.assertIn("8 demo · t7", out[17])
         self.assertIn("demo · cup8 12:08", out[21])  # newest cup first

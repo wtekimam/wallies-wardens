@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""herdr pet: one Mochi per Firstmate worker, in a Herdr pane (a strip on top of the Firstmate tab, or a popup).
+"""herdr pet: one Mochi per Firstmate worker, plus one (blue, first) for the main Firstmate session, in a Herdr pane (a strip on top of the Firstmate tab, or a popup).
 
-Read-only view of a Firstmate home. Per worker it reads only state/<id>.meta, the tail of
+Read-only view of a Firstmate home. The main session's mood is the agent_status of the Herdr pane whose cwd is the home
+(`herdr pane list`, once per poll). Per worker it reads only state/<id>.meta, the tail of
 state/<id>.status, the mtime of state/<id>.turn-ended and the mtime of state/<id>.inbox/handled/.
 It never writes under the Firstmate home and never runs Firstmate scripts.
 
@@ -95,6 +96,10 @@ PROJECT_PALS = [  # eight project colours: ginger, grey, charcoal (yellow eyes),
  dict(B="#5fd7c0", d="#3fb8a2", W="#e0fff7", A="#3fb8a2", w="#c0caf5", b="#3fb8a2", L="#f7768e"),  # a cyan collar vanishes on teal: red
  dict(B="#ff8fa3", d="#e06a86", W="#ffe3d6", A="#e06a86", w="#c0caf5", b="#e06a86")]
 
+MAIN_PAL = dict(B="#7aa2f7", d="#5878c8", W="#e6efff", A="#5878c8", w="#c0caf5", b="#5878c8", L="#ff9e64")  # the main session: blue, an orange collar shows on it
+PALS = PROJECT_PALS + [MAIN_PAL]  # index len(PROJECT_PALS) is the main session's; colour_of never picks it
+MAIN = len(PROJECT_PALS)
+
 def colour_of(project):  # stable across runs (crc32, not hash()); collisions accepted for now per the captain
     return zlib.crc32(project.encode()) % len(PROJECT_PALS)
 
@@ -110,7 +115,7 @@ def shade(g, pal):  # underside shadow: body pixels with empty space below get t
 
 @functools.lru_cache(maxsize=None)
 def creature(mood, acc=None, colour=0, f=0):  # f: animation frame 0/1; frame 0 is the approved still
-    pal, g = {**PROPS, **PROJECT_PALS[colour]}, G(MOCHI)
+    pal, g = {**PROPS, **PALS[colour]}, G(MOCHI)
     for r, col, s in ACC.get(acc, []): put(g, [(r, col, s)])
     def eyes(kind):
         if kind == "focus": put(g, [(ER - 1, CL, "NN"), (ER - 1, CR - 1, "NN")])
@@ -251,9 +256,17 @@ def short_task(wid, project):  # drop leading id words the project name already 
     while len(words) > 1 and words[0] in project: words.pop(0)
     return " ".join(words)
 
+MAIN_MOOD = dict(working=("busy", "", "working"), blocked=("calling", "needs you!", ""))  # anything else (idle, done, unknown) is a calm doze
+
+def main_worker(p):
+    mood, bubble, sub = MAIN_MOOD.get(p.get("agent_status"), ("asleep", "", "idle"))
+    return dict(id="firstmate", project="main", kind="main", main=True, mood=mood, bubble=bubble, sub=sub, born=0, age="main", hunger=None,
+                hn="main session", acc="collar", colour=MAIN, ws=p.get("workspace_id"), tab=p.get("tab_id"), pane=p.get("pane_id"), merge_ready=False)
+
 # ---- the pet: keeps accessories stable, parties merged workers and keeps their cups (process memory only) ----
 class Pet:
-    def __init__(self, home):
+    def __init__(self, home, list_panes=None):  # list_panes() -> Herdr's pane list; None (no Herdr) means no main Mochi
+        self.home, self.list_panes = home, list_panes
         self.state = os.path.join(home, "state")
         self.accs, self.seen, self.ghosts, self.trophies = {}, {}, [], []
 
@@ -279,7 +292,13 @@ class Pet:
         for g in [g for g in self.ghosts if now - g["gone"] >= PARTY_SECS]:
             self.ghosts.remove(g)
             self.trophies.append((g["project"], short_task(g["id"], g["project"]), time.strftime("%H:%M", time.localtime(g["gone"]))))
-        return workers + self.ghosts
+        return self.main_mochi(now) + workers + self.ghosts
+
+    def main_mochi(self, now):  # the Firstmate session's own pane, if Herdr has one; any Herdr trouble means none
+        if not self.list_panes: return []
+        try: p = next((p for p in self.list_panes() if same_dir(p.get("cwd"), self.home) and not is_pet(p)), None)
+        except Exception: return []
+        return [main_worker(p)] if p else []
 
 # ---- layout: 80 columns, wider when the pane fits more cells ----
 W, CW, CH = 80, 19, 10  # minimum frame width; one creature cell's width and height
@@ -295,7 +314,7 @@ def frame(title, rows, right="", w=W):
     top = c(FRAME, "╭─ ") + c("bb9af7", title, True) + c(FRAME, " " + "─" * (w - 1 - used)) + (" " + right if right else "") + c(FRAME, "╮")
     return [top] + [c(FRAME, "│") + padr(r, inner) + c(FRAME, "│") for r in rows] + [c(FRAME, "╰" + "─" * inner + "╯")]
 
-def hearts(n): return c("f7768e", "♥" * n) + c(DIM, "♡" * (5 - n))
+def hearts(n): return c("f7768e", "●" * n) + c(DIM, "○" * (5 - n))  # ● is solid in every terminal font; ♥ drew as an outline in Herdr
 
 def cell(i, w, tick=None):  # tick None: the still frame
     proj = clip(w["project"], 8)
@@ -303,9 +322,9 @@ def cell(i, w, tick=None):  # tick None: the still frame
     label = c("e0af68", str(i), True) + " " + c(FG, proj, True) + c(DIM, " · ") + c("a9b1d6", task)
     last = c("ffffff", f'"{w["bubble"]}"', True) if w["bubble"] else c(DIM, w["sub"])
     f = 0 if tick is None else ((tick // 2 if w["mood"] == "asleep" else tick) + i) % 2  # neighbours out of step; asleep at half speed
-    body = creature(w["mood"], w.get("acc"), colour_of(w["project"]), f)
+    body = creature(w["mood"], w.get("acc"), w.get("colour", colour_of(w["project"])), f)
     return [center(x, CW) for x in body] + [center(label, CW), center(c(MC[w["mood"]], w["mood"]) + c(DIM, f" · {w['age']}"), CW),
-            center(hearts(w["hunger"]) + c(DIM, " " + w["hn"]), CW), center(last, CW)]
+            center(c(DIM, w["hn"]) if w["hunger"] is None else hearts(w["hunger"]) + c(DIM, " " + w["hn"]), CW), center(last, CW)]
 
 def trophy_rows(items):
     head = " " + c("f7d774", "trophies · this session", True)
@@ -318,8 +337,9 @@ def trophy_rows(items):
 
 def panel(workers, rows, w=W):
     more = len(workers) - SHOWN
+    n = sum(not w.get("main") for w in workers)
     right = (c("e0af68", f"+{more} more", True) + c(DIM, " · ") if more > 0 else "") + c("9ece6a", "●") + c(DIM, f" live {POLL}s")
-    return frame(f"herdr pet · {len(workers)} worker{'s' if len(workers) != 1 else ''}", rows, right, w)
+    return frame(f"herdr pet · {n} worker{'s' if n != 1 else ''}", rows, right, w)
 
 def creatures(shown, width=W, tick=None):  # up to eight Mochis, as many across as fit, CH rows each: sprite, label, mood, hearts, bubble
     cols, _, w = grid(len(shown), width)
@@ -425,7 +445,7 @@ def pin(herdr, home):
     fm = next(p for p in panes if p["pane_id"] == pane)
     for cmd in refocus_cmds(was, fm, lambda d: call("pane", "neighbor", "--pane", pane, "--direction", d)["neighbor"].get("neighbor_pane_id")):
         call(*cmd)
-    fit_strip(call, new, strip_rows(len(Pet(home).poll(time.time()))))  # the strip itself refits when a second row comes or goes
+    fit_strip(call, new, strip_rows(len(Pet(home, lambda: panes).poll(time.time()))))  # the strip itself refits when a second row comes or goes
     print(f"pinned pet pane {new} above {pane}"); return 0
 
 # ---- config + live loop ----
@@ -495,7 +515,8 @@ def live(pet):
 
 def main(argv):
     if "--pin" in argv: return pin(os.environ.get("HERDR_BIN_PATH", "herdr"), fm_home())
-    pet = Pet(fm_home())
+    herdr = os.environ.get("HERDR_BIN_PATH", "herdr")  # ponytail: one `pane list` per poll (every POLL s); a missing herdr just means no main Mochi
+    pet = Pet(fm_home(), lambda: herdr_call(herdr, "pane", "list")["panes"])
     if "--once" in argv:
         lay = render_strip if "--strip" in argv else render
         print("\n".join(to_ansi(l) for l in lay(pet.poll(time.time()), pet.trophies)))
