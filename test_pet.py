@@ -1,5 +1,5 @@
 """python3 -m unittest test_pet  -- fixture Firstmate-style state dirs, no live home touched."""
-import json, os, subprocess, sys, tempfile, time, unittest, zlib
+import json, os, re, subprocess, sys, tempfile, time, unittest, zlib
 import pet
 
 NOW = 1790000000
@@ -53,6 +53,69 @@ class Moods(unittest.TestCase):
         self.check([f"working [at={NOW - 7200}]: building"], "asleep", active=NOW - pet.ASLEEP_SECS - 60)
     def test_calling_never_sleeps(self):
         self.check([f"needs-decision [at={NOW - 7200}]: A or B"], "calling", bubble="your call!", active=NOW - 7200)
+
+class Decisions(unittest.TestCase):
+    def setUp(self): self.h = Home()
+    def tearDown(self): self.h.tmp.cleanup()
+
+    def plain(self, lines): return [pet.TAG.sub("", l) for l in lines]
+
+    def test_fold_open_resolved_and_blocked(self):
+        k = lambda wid, *lines, **kw: self.h.read(self.h.worker(wid, lines=list(lines), **kw))["decision"]
+        d = k("demo-a", f"needs-decision [key=k] [at={NOW - 120}]: A or B", f"working [at={NOW}]: x")  # status_state's rule: an unresolved ask stays the newest state only until a later line
+        self.assertIsNone(d)
+        d = k("demo-b", f"working [at={NOW - 600}]: go", f"needs-decision [key=k] [at={NOW - 120}]: ship A or B?")
+        self.assertEqual((d["kind"], d["text"], d["waiting"], d["report"], d["pr"]), ("needs-decision", "ship A or B?", "2m", "", ""))
+        self.assertIsNone(k("demo-c", f"needs-decision [key=k] [at={NOW - 9}]: A?", f"resolved [key=k] [at={NOW}]: A"))
+        self.assertIsNone(k("demo-d", f"blocked [key=k] [at={NOW - 9}]: CI", f"captain-held [key=k] [at={NOW}]: wait"))
+        self.assertEqual(k("demo-e", f"blocked [at={NOW - 3600}]: CI red")["kind"], "blocked")
+        self.assertIsNone(k("demo-f", f"done [at={NOW}]: PR https://x/pull/1"))
+
+    def test_links(self):
+        wid = self.h.worker("demo-l", lines=[f"needs-decision [at={NOW}]: A or B"], pr="https://x/pull/7")
+        os.makedirs(os.path.join(self.h.root, "data", wid)); open(os.path.join(self.h.root, "data", wid, "report.md"), "w").close()
+        d = self.h.read(wid)["decision"]
+        self.assertEqual((d["report"], d["pr"]), (os.path.join(self.h.root, "data", wid, "report.md"), "https://x/pull/7"))
+
+    def test_view(self):
+        wid = self.h.worker("demo-l", lines=[f"needs-decision [at={NOW - 300}]: found X; blocked on Y; need a choice"], pr="https://x/pull/7")
+        ws = [self.h.read(wid), self.h.read(self.h.worker("demo-q", lines=[f"working [at={NOW}]: go"]))]
+        out = self.plain(pet.draw(ws, [], 40, view="d"))
+        self.assertEqual(len(out), pet.FULL_ROWS)
+        body = "\n".join(out)
+        for s in ("decisions · open · 1", "demo", "needs-decision", "waiting 5m", "found X; blocked on Y; need a choice", "PR https://x/pull/7", "d back", "t trophies"):
+            self.assertIn(s, body)
+        self.assertNotIn("demo-q", body)
+        self.assertNotIn("building", body)  # the Mochis are replaced
+        self.assertIn("d decisions", "\n".join(self.plain(pet.draw(ws, [], 40))))
+        strip = self.plain(pet.draw(ws, [], pet.STRIP_ROWS, view="d"))
+        self.assertIn("d back", strip[0])
+        self.assertEqual(len(strip), pet.STRIP_ROWS)
+        self.assertIn("d decisions", self.plain(pet.draw(ws, [], pet.STRIP_ROWS))[0])
+        self.assertTrue(all(len(l) == pet.W for l in strip))
+
+    def test_empty_and_overflow(self):
+        self.assertIn("decisions · open · none", self.plain(pet.draw([], [], 40, view="d"))[2])
+        ws = [self.h.read(self.h.worker(f"demo-t{i}", lines=[f"needs-decision [at={NOW - i}]: q{i}"])) for i in range(6)]
+        out = self.plain(pet.draw(ws, [], 40, 156, view="d"))  # six Mochis fit one row at 156 columns: 11 lines
+        self.assertEqual(len(out), pet.FULL_ROWS)
+        self.assertIn("+3 more", "\n".join(out))  # heading + 3 cards of 3 lines would not leave a line for it: 2 cards fit
+        self.assertIn("t5", "\n".join(out))  # oldest wait (at=NOW-5) first
+        self.assertNotIn("t0", "\n".join(out))
+
+    def test_calling_label_tag(self):
+        w = self.h.read(self.h.worker("demo-tagged", lines=[f"needs-decision [at={NOW}]: which colour for the bikeshed"]))
+        label = self.plain(pet.cell(1, w))[7]
+        self.assertIn("tagged · which", label)
+        self.assertLessEqual(len(label), pet.CW)
+        self.assertEqual(len(pet.cell(1, w)), pet.CH)
+        busy = self.h.read(self.h.worker("demo-plain", lines=[f"working [at={NOW}]: go"]))
+        self.assertNotIn("·", self.plain(pet.cell(1, busy))[7])
+
+    def test_once_cli_shows_tag(self):
+        self.h.worker("demo-cli", lines=[f"needs-decision [at={int(time.time())}]: pick one"], active=time.time())
+        out = subprocess.run([sys.executable, pet.__file__, "--once"], env={**os.environ, "FM_HOME": self.h.root}, capture_output=True, text=True, check=True).stdout
+        self.assertIn("pick one", re.sub(r"\x1b\[[0-9;]*m", "", out))
 
 class Hunger(unittest.TestCase):
     def setUp(self): self.h = Home()
@@ -279,12 +342,12 @@ class Panel(unittest.TestCase):
         ws = [pet.main_worker(dict(agent_status="working"))]
         items = [("demo", "t", "12:00", "t", "local")] * 5
         for rows in (pet.STRIP_ROWS, 40):
-            a, b = pet.draw(ws, items, rows), pet.draw(ws, items, rows, room=True)
+            a, b = pet.draw(ws, items, rows), pet.draw(ws, items, rows, view="t")
             self.assertEqual(len(a), len(b))
             self.assertNotIn("main", "".join(pet.TAG.sub("", l) for l in b[3:-3]))
         self.assertIn("t trophies", "".join(pet.TAG.sub("", l) for l in pet.draw(ws, items, 40)))
-        self.assertIn("t back", "".join(pet.TAG.sub("", l) for l in pet.draw(ws, items, 40, room=True)))
-        self.assertIn("t back", pet.TAG.sub("", pet.draw(ws, items, pet.STRIP_ROWS, room=True)[0]))
+        self.assertIn("t back", "".join(pet.TAG.sub("", l) for l in pet.draw(ws, items, 40, view="t")))
+        self.assertIn("t back", pet.TAG.sub("", pet.draw(ws, items, pet.STRIP_ROWS, view="t")[0]))
         self.assertIn("t trophies", pet.TAG.sub("", pet.draw(ws, items, pet.STRIP_ROWS)[0]))
 
     def test_sprites_match_the_agreed_mochi(self):

@@ -49,9 +49,11 @@ Each Mochi has a two-line label: `N project` (`1 main` for the main session), th
 Each line is centred and cut to the column width on its own.
 The trophy column (24 columns wide) sits at the right edge with one cup per project: the project name and `×N` (today's merges), the project with the newest merge on top, and a `today: N` total under the heading. `+N more` counts the projects that don't fit.
 Press `t` for the trophy room: it replaces the Mochis and the column with a full-width list, grouped by project (cup and `project ×N`, newest project first), then one line per merge with its local time, task name (without the leading `<project>-`) and `PR #<n>` or `local`. It has no scrolling; what doesn't fit ends in `+N more`. `t` again returns to the Mochis.
-The footer shows `t trophies` (`t back` in the trophy room), `r redraw` and `q close`.
+Press `d` for open decisions: it swaps the Mochis for a full-width list of cards, oldest wait first. A worker's open decision is its newest unresolved `needs-decision` or `blocked` line (a `resolved` or `captain-held` line closes it, the same rule that makes a Mochi call). Each card shows the project, task, kind and how long it has waited, the line's text clipped to the width, and the report (`data/<id>/report.md`, when it exists) and PR (`pr=` in the meta file) when there are any. No scrolling: what doesn't fit ends in `+N more`, and an empty list says `none`. `d` again returns to the Mochis. Wardens only shows decisions; answer them in chat with Firstmate.
+A Mochi that is calling about a decision also gets a short tag on its second label line: `task · <decision text>`, cut to fit.
+The footer shows `t trophies`, `d decisions` (`back` for the open view), `r redraw` and `q close`.
 When the pane is too short for the full panel (16 rows, plus 11 per further row of Mochis), the pet draws the strip:
-the same Mochis and trophy column, with `t trophies` and `q close` in the title bar. `t` works there too, and the strip keeps its height when you switch.
+the same Mochis and trophy column, with `q close`, `t trophies` and `d decisions` in the title bar (the last hints drop first when `+N more` leaves no room). `t` and `d` work there too, and the strip keeps its height when you switch.
 The strip needs 13 rows, plus 11 per further row. It redraws when the pane is resized.
 
 ## Config
@@ -72,6 +74,7 @@ With eight animated Mochis the pane used about 0.4% of one CPU core, measured ov
 | key | action |
 |---|---|
 | `t` | toggle the trophy room (the Mochis come back on the next `t`) |
+| `d` | toggle the open decisions (the Mochis come back on the next `d`) |
 | `r` | redraw |
 | `q` | close |
 | `Esc` | close the popup (the strip ignores it, so arrow keys don't close it) |
@@ -83,6 +86,7 @@ Every 3 seconds, for each `state/<id>.meta` in the Firstmate home, it reads:
 - `state/<id>.meta`: project, kind, spawn time, Herdr ids
 - the last 8 KB of `state/<id>.status`
 - the mtime of `state/<id>.turn-ended` and of `state/<id>.inbox/handled/`
+- whether `data/<id>/report.md` exists, only for a worker with an open decision
 - `state/fleet-ledger.jsonl`, for trophies (see below). It remembers a byte offset, so each poll parses only the lines appended since the last, and it stops at a half-written last line until its newline arrives.
   A missing file, blank or malformed lines, and unknown events or members are ignored.
   A truncated file starts the trophies over.
