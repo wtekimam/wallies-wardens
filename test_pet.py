@@ -300,6 +300,41 @@ class Panel(unittest.TestCase):
         self.assertIn("none yet today", pet.TAG.sub("", "".join(pet.trophy_col([], 4))))
         self.assertNotIn("more", "".join(pet.TAG.sub("", l) for l in pet.trophy_col(items[:2], 8)))
 
+    def test_trophy_week_window(self):
+        at = lambda d, h=12, m=0: time.mktime((2026, 9, d, h, m, 0, 0, 0, -1))  # Sep 21 2026 is a Monday
+        merged = [dict(task=f"a-{n}", ts=ts, project="a", ref="") for n, ts in
+                  (("sun", at(20, 23, 59)), ("mon", at(21, 0, 0)), ("wed", at(23, 14, 5)), ("sun2", at(27, 23, 59)), ("next", at(28, 0, 0)))]
+        names = lambda now, week: [t[1] for t in pet.trophies_today(merged, now, week)]
+        self.assertEqual(names(at(23, 15), True), ["mon", "wed", "sun2"])  # Monday 00:00 through Sunday; the Sunday before and Monday after are out
+        self.assertEqual(names(at(27, 23, 59), True), ["mon", "wed", "sun2"])
+        self.assertEqual(names(at(28, 1), True), ["next"])
+        self.assertEqual(names(at(23, 15), False), ["wed"])  # today alone is unchanged
+        self.assertEqual([t[2] for t in pet.trophies_today(merged, at(23, 15), True)][1], "Wed 14:05")
+        self.assertEqual(pet.trophies_today(merged, at(23, 15))[0][2], "14:05")
+
+    def test_trophy_week_toggle(self):
+        self.ledger(dict(v=1, ts=NOW - 3 * 86400, event="task.merged", task="a-old", via="local"),
+                    dict(v=1, ts=NOW, event="task.merged", task="a-new", via="local"))
+        p = pet.Pet(self.h.root)
+        p.poll(NOW)
+        self.assertEqual([t[1] for t in p.trophies], ["a new"])
+        p.week = True
+        p.poll(NOW)
+        self.assertEqual(len(p.trophies), 2 if time.localtime(NOW).tm_wday >= 3 else 1)  # three days back is this week only from Thursday on
+        items = [("a", "x", "Mon 09:00", "fix-x", "PR #7")]
+        col = [pet.TAG.sub("", l) for l in pet.trophy_col(items, 8, True)]
+        self.assertIn("trophies · this week", col[0])
+        self.assertIn("this week: 1", col[1])
+        self.assertIn("last Mon 09:00", col[3])
+        self.assertIn("none yet this week", "".join(pet.TAG.sub("", l) for l in pet.trophy_col([], 4, True)))
+        out = [pet.TAG.sub("", l) for l in pet.trophy_room(items, 4, 70, True)]
+        self.assertIn("trophy room · this week", out[0])
+        self.assertIn("Mon 09:00 fix-x PR #7", out[2])
+        ws = [pet.main_worker(dict(agent_status="working"))]
+        self.assertIn("w week", "".join(pet.TAG.sub("", l) for l in pet.render(ws, items)))
+        self.assertIn("w today", "".join(pet.TAG.sub("", l) for l in pet.render(ws, items, week=True)))
+        self.assertIn("w today", pet.TAG.sub("", pet.draw(ws, items, pet.STRIP_ROWS, 120, week=True)[0]))
+
     def test_trophies_group_by_project_newest_first(self):
         items = [("a", "x", "09:00", "x", ""), ("b", "y", "10:00", "y", ""), ("a", "z", "11:00", "z", ""), (None, "q", "12:00", "q", "")]
         self.assertEqual([(p, len(ts)) for p, ts in pet.by_project(items)], [(None, 1), ("a", 2), ("b", 1)])

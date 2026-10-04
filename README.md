@@ -47,13 +47,13 @@ A tiled strip on top of the Firstmate tab is the closest fit.
 Any more workers show as `+N more` in the title.
 Each Mochi has a two-line label: `N project` (`1 main` for the main session), then the task or session name.
 Each line is centred and cut to the column width on its own.
-The trophy column (24 columns wide) sits at the right edge with one cup per project: the project name and `×N` (today's merges), the project with the newest merge on top, and a `today: N` total under the heading. `+N more` counts the projects that don't fit.
+The trophy column (24 columns wide) sits at the right edge with one cup per project: the project name and `×N` (today's merges, or this week's after `w`), the project with the newest merge on top, and a `today: N` (`this week: N`) total under the heading. `+N more` counts the projects that don't fit.
 Press `t` for the trophy room: it replaces the Mochis and the column with a full-width list, grouped by project (cup and `project ×N`, newest project first), then one line per merge with its local time, task name (without the leading `<project>-`) and `PR #<n>` or `local`. It has no scrolling; what doesn't fit ends in `+N more`. `t` again returns to the Mochis.
 Press `d` for open decisions: it swaps the Mochis for a full-width list of cards, oldest wait first. A worker's open decision is its newest unresolved `needs-decision` or `blocked` line (a `resolved` or `captain-held` line closes it, the same rule that makes a Mochi call). Each card shows the project, task, kind and how long it has waited, the line's text clipped to the width, and the report (`data/<id>/report.md`, when it exists) and PR (`pr=` in the meta file) when there are any. No scrolling: what doesn't fit ends in `+N more`, and an empty list says `none`. `d` again returns to the Mochis. Wardens only shows decisions; answer them in chat with Firstmate.
 A Mochi that is calling about a decision also gets a short tag on its second label line: `task · <decision text>`, cut to fit.
-The footer shows `t trophies`, `d decisions` (`back` for the open view), `r redraw` and `q close`.
+The footer shows `t trophies`, `d decisions`, `w week` (`w today` once toggled) (`back` for the open view), `r redraw` and `q close`.
 When the pane is too short for the full panel (16 rows, plus 11 per further row of Mochis), the pet draws the strip:
-the same Mochis and trophy column, with `q close`, `t trophies` and `d decisions` in the title bar (the last hints drop first when `+N more` leaves no room). `t` and `d` work there too, and the strip keeps its height when you switch.
+the same Mochis and trophy column, with `q close`, `t trophies`, `d decisions` and `w week` in the title bar (the last hints drop first when `+N more` leaves no room). `t` and `d` work there too, and the strip keeps its height when you switch.
 The strip needs 13 rows, plus 11 per further row. It redraws when the pane is resized.
 
 ## Config
@@ -75,6 +75,7 @@ With eight animated Mochis the pane used about 0.4% of one CPU core, measured ov
 |---|---|
 | `t` | toggle the trophy room (the Mochis come back on the next `t`) |
 | `d` | toggle the open decisions (the Mochis come back on the next `d`) |
+| `w` | switch the trophy column and room between today and this week (calendar week from Monday, local time); in the week the room shows each merge as `Mon 14:05` |
 | `r` | redraw |
 | `q` | close |
 | `Esc` | close the popup (the strip ignores it, so arrow keys don't close it) |
@@ -136,7 +137,7 @@ The collar is cyan, except on a teal Mochi, where it is red so it shows.
 
 **Trophies:** every `task.merged` record in the Firstmate home's fleet activity ledger (`state/fleet-ledger.jsonl`) counts toward its project's gold cup (`×N`), whether the PR merged on GitHub or a local-only branch landed.
 The project comes from the task's `task.dispatched` record, else the `project=` basename in `state/<id>.meta`, else the longest project name in the home's `data/projects.md` that the task id starts with (followed by `-`), else it is left out.
-Both views show today's merges only (local day of the record's `ts`). The room reads `PR #<n>` from the record's `pr` URL, or `local` for `via: local`. Cups come from the file, so closing the pane or restarting keeps them.
+Both views show today's merges by default (local day of the record's `ts`); `w` widens them to this calendar week, Monday 00:00 local onward, headed `this week`. The room reads `PR #<n>` from the record's `pr` URL, or `local` for `via: local`. Cups come from the file, so closing the pane or restarting keeps them.
 When a merge record arrives for a Mochi that is still shown, it parties for 30 seconds. Records already in the file at startup, or for a Mochi that is gone, don't party.
 A merge only counts when Firstmate records it and the ledger is on for that home (the `config/fleet-ledger` flag, see Firstmate's `docs/fleet-ledger.md`). With the flag off there are no cups.
 A repeated record for the same task and time counts once.
