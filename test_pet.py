@@ -270,6 +270,7 @@ class Panel(unittest.TestCase):
         day = 86400
         self.ledger(*[dict(v=1, ts=NOW + k * day, event="task.merged", task=n, via="local") for n, k in (("old", -2), ("yest", -1), ("now", 0), ("later", 1))])
         p = pet.Pet(self.h.root)
+        p.week = False
         p.poll(NOW)
         self.assertEqual([t[1] for t in p.trophies], ["now"])
         p.poll(NOW + day)
@@ -316,11 +317,12 @@ class Panel(unittest.TestCase):
         self.ledger(dict(v=1, ts=NOW - 3 * 86400, event="task.merged", task="a-old", via="local"),
                     dict(v=1, ts=NOW, event="task.merged", task="a-new", via="local"))
         p = pet.Pet(self.h.root)
-        p.poll(NOW)
-        self.assertEqual([t[1] for t in p.trophies], ["a new"])
-        p.week = True
+        self.assertTrue(p.week)  # opens on this week
         p.poll(NOW)
         self.assertEqual(len(p.trophies), 2 if time.localtime(NOW).tm_wday >= 3 else 1)  # three days back is this week only from Thursday on
+        p.week = False
+        p.poll(NOW)
+        self.assertEqual([t[1] for t in p.trophies], ["a new"])
         items = [("a", "x", "Mon 09:00", "fix-x", "PR #7")]
         col = [pet.TAG.sub("", l) for l in pet.trophy_col(items, 8, True)]
         self.assertIn("trophies · this week", col[0])

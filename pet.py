@@ -332,7 +332,7 @@ class Pet:
         self.home, self.list_panes = home, list_panes
         self.state = os.path.join(home, "state")
         self.ledger = Ledger(self.state)
-        self.accs, self.party, self.trophies, self.primed, self.week = {}, {}, [], False, False
+        self.accs, self.party, self.trophies, self.primed, self.week = {}, {}, [], False, True
 
     def poll(self, now):
         try: ids = sorted(e.name[:-5] for e in os.scandir(self.state) if e.name.endswith(".meta"))
