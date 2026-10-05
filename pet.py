@@ -231,9 +231,10 @@ def read_worker(state_dir, wid, now):
     born = int(spawn) if spawn.isdigit() else mtime(os.path.join(state_dir, wid + ".meta"))
 
     bubble, sub, dec = "", "", None
-    if st in ("needs-decision", "blocked"):  # an open decision: its newest unresolved line (status_state already applied resolved/captain-held)
+    review = st == "done" and not MERGED.search(text) and (meta.get("pr") or kind == "scout")  # waiting on the captain's review: a decision of its own kind
+    if st in ("needs-decision", "blocked") or review:  # an open decision: its newest unresolved line (status_state already applied resolved/captain-held)
         report = os.path.join(os.path.dirname(state_dir), "data", wid, "report.md")
-        dec = dict(kind=st, text=text, waiting=age(max(0, now - (at or last_active))), at=at or last_active,
+        dec = dict(kind="review" if review else st, text=text, waiting=age(max(0, now - (at or last_active))), at=at or last_active,
                    report=report if os.path.exists(report) else "", pr=meta.get("pr", ""))
     if st in ("blocked", "failed"): mood, sub = "sick", st
     elif st == "needs-decision": mood, bubble = "calling", "your call!"
@@ -383,7 +384,7 @@ def hearts(n): return c("f7768e", "●" * n) + c(DIM, "○" * (5 - n))  # ● is
 def cell(i, w, tick=None):  # tick None: the still frame
     n = f"{i} "  # one column of each line stays free between cells
     proj = c("e0af68", str(i), True) + " " + c(FG, clip(w["project"], CW - 1 - len(n)), True)
-    name, tag = short_task(w["id"], w["project"]), w.get("decision") and w["mood"] == "calling" and w["decision"]["text"]
+    name, tag = short_task(w["id"], w["project"]), w.get("decision") and w["decision"]["kind"] == "needs-decision" and w["decision"]["text"]
     if tag:  # a calling Mochi says what the call is about: "task · tag" on the second label line
         name = clip(name, 8)
         task = c("a9b1d6", name) + c("bb9af7", clip(" · " + tag, CW - 1 - len(name)))
@@ -447,7 +448,7 @@ def trophy_room(items, h, w, week=False, page=0):  # -> h lines of w columns: th
 
 def decision_card(x, w):  # x: a worker with an open decision -> 3 lines: project and age, the status line's text, where the report / PR is
     d = x["decision"]
-    k = c("bb9af7" if d["kind"] == "needs-decision" else "9ece6a", d["kind"])
+    k = c({"needs-decision": "bb9af7", "review": "7dcfff"}.get(d["kind"], "9ece6a"), d["kind"])
     head = " " + c("f7d774", "●") + " " + c(FG, x["project"], True) + c(DIM, " · " + short_task(x["id"], x["project"]) + " · ") + k + c(DIM, " · waiting " + d["waiting"])
     links = "  ".join(x for x in (d["report"] and "report " + d["report"], d["pr"] and "PR " + d["pr"]) if x)
     return [head, "   " + c(FG, clip(d["text"] or "(no details)", w - 5)), "   " + c(DIM, clip(links or "no report or PR yet", w - 5))]
@@ -486,13 +487,17 @@ def creatures(shown, trophies, width=W, tick=None, view=None, decs=(), week=Fals
 
 def hint(key, label, view, cur): return c("e0af68", key) + c(DIM, " back" if view == cur else " " + label)  # the key's footer hint: "back" while its view is open
 
+def dec_hint(view, n):  # "d decisions (N)" in the decision accent while anything waits; plain and dim at zero
+    if view == "d" or not n: return hint("d", "decisions", "d", view)
+    return c("e0af68", "d") + c("bb9af7", f" decisions ({n})", True)
+
 def week_hint(week): return c("e0af68", "w") + c(DIM, " today" if week else " week")  # flips the trophy window; the label names what it switches to
 
 def render(workers, trophies, width=W, tick=None, view=None, week=False, page=0):
     shown, w = workers[:SHOWN], grid(len(workers), width)[2]
     sep = c(FRAME, " " + "─" * (w - 4))
     rows = [""] + creatures(shown, trophies, width, tick, view, decisions_of(workers), week, page) + [
-        sep, " " + hint("t", "trophies", "t", view) + "  " + hint("d", "decisions", "d", view) + "  " + week_hint(week) + "  " +
+        sep, " " + hint("t", "trophies", "t", view) + "  " + dec_hint(view, len(decisions_of(workers))) + "  " + week_hint(week) + "  " +
         c("e0af68", "r") + c(DIM, " redraw  ") + c("e0af68", "q") + c(DIM, " close")]
     return panel(workers, rows, w)
 
@@ -506,8 +511,10 @@ def layout_for(rows, n=0, width=W): return "full" if rows >= full_rows(n, width)
 
 def render_strip(workers, trophies, width=W, tick=None, view=None, week=False, page=0):
     shown, w = workers[:SHOWN], grid(len(workers), width)[2]
-    return panel(workers, creatures(shown, trophies, width, tick, view, decisions_of(workers), week, page), w,
-                 [c(DIM, " · ") + c("e0af68", "q") + c(DIM, " close"), c(DIM, " · ") + hint("t", "trophies", "t", view), c(DIM, " · ") + hint("d", "decisions", "d", view), c(DIM, " · ") + week_hint(week)])
+    decs = decisions_of(workers)
+    keys = [c(DIM, " · ") + x for x in (c("e0af68", "q") + c(DIM, " close"), hint("t", "trophies", "t", view), dec_hint(view, len(decs)), week_hint(week))]
+    if decs and view != "d": keys.insert(1, keys.pop(2))  # something waits: "d decisions (N)" outlives "t trophies" when the bar is tight
+    return panel(workers, creatures(shown, trophies, width, tick, view, decs, week, page), w, keys)
 
 def draw(workers, trophies, rows, width=W, tick=None, view=None, week=False, page=0):  # -> lines for a terminal this size; never more lines than fit (that would scroll)
     lay = render if layout_for(rows, len(workers), width) == "full" else render_strip

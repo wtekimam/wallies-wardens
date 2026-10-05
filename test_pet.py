@@ -87,12 +87,38 @@ class Decisions(unittest.TestCase):
             self.assertIn(s, body)
         self.assertNotIn("demo-q", body)
         self.assertNotIn("building", body)  # the Mochis are replaced
-        self.assertIn("d decisions", "\n".join(self.plain(pet.draw(ws, [], 40))))
+        self.assertIn("d decisions (1)", "\n".join(self.plain(pet.draw(ws, [], 40))))
         strip = self.plain(pet.draw(ws, [], pet.STRIP_ROWS, view="d"))
         self.assertIn("d back", strip[0])
         self.assertEqual(len(strip), pet.STRIP_ROWS)
-        self.assertIn("d decisions", self.plain(pet.draw(ws, [], pet.STRIP_ROWS))[0])
+        self.assertIn("d decisions (1)", self.plain(pet.draw(ws, [], pet.STRIP_ROWS))[0])
         self.assertTrue(all(len(l) == pet.W for l in strip))
+
+    def test_count_in_hint(self):
+        mk = lambda n: [self.h.read(self.h.worker(f"demo-n{i}", lines=[f"needs-decision [at={NOW - i}]: q"])) for i in range(n)]
+        for n in (0, 1, 3):
+            ws = mk(n)
+            for out in (pet.draw(ws, [], 40, 156), pet.draw(ws, [], pet.STRIP_ROWS, 156)):
+                body = "\n".join(self.plain(out))
+                self.assertIn(f"d decisions ({n})" if n else "d decisions", body)
+                self.assertEqual("(" in body.split("d decisions")[1][:2], n > 0)
+        raw = "\n".join(pet.draw(mk(1), [], 40, 156))
+        self.assertIn(pet.c("bb9af7", " decisions (1)", True), raw)  # the accent, not dim
+        self.assertNotIn(pet.c(pet.DIM, " decisions"), "\n".join(pet.draw(mk(1), [], 40, 156)))
+        self.assertIn(pet.c(pet.DIM, " decisions"), "\n".join(pet.draw(mk(0), [], 40, 156)))
+        self.assertIn("d decisions (3)", self.plain(pet.draw(mk(3), [], pet.STRIP_ROWS, 60))[0])  # tight: the count still shows, later hints drop first
+
+    def test_review_card(self):
+        a = self.h.read(self.h.worker("demo-r", lines=[f"done [at={NOW - 300}]: ready"], pr="https://x/pull/9"))
+        s = self.h.read(self.h.worker("demo-s", kind="scout", lines=[f"done [at={NOW - 900}]: report ready"]))
+        m = self.h.read(self.h.worker("demo-m", lines=[f"done [at={NOW}]: merged https://x/pull/8"], pr="https://x/pull/8"))
+        n = self.h.read(self.h.worker("demo-n", lines=[f"done [at={NOW}]: local"]))
+        self.assertEqual((a["decision"]["kind"], a["decision"]["pr"]), ("review", "https://x/pull/9"))
+        self.assertEqual(s["decision"]["kind"], "review")
+        self.assertIsNone(m["decision"]); self.assertIsNone(n["decision"])
+        self.assertEqual([x["id"] for x in pet.decisions_of([a, s, m, n])], ["demo-s", "demo-r"])  # oldest wait first
+        body = "\n".join(self.plain(pet.draw([a, s], [], 40, view="d")))
+        for t in ("decisions · open · 2", "review", "waiting 15m", "PR https://x/pull/9"): self.assertIn(t, body)
 
     def test_empty_and_overflow(self):
         self.assertIn("decisions · open · none", self.plain(pet.draw([], [], 40, view="d"))[2])
