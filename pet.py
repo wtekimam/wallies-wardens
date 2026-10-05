@@ -418,21 +418,32 @@ def trophy_col(items, h, week=False):  # -> h lines of TW columns: heading, the 
         lines.append(c(FRAME, "│ ") + c(DIM, f"+{len(groups) - fit} more"))
     return [padr(l, TW) for l in (lines + [c(FRAME, "│")] * h)[:h]]
 
-def trophy_room(items, h, w, week=False):  # -> h lines of w columns: the creatures' place in the trophy view; per project a cup and "project ×N", then a line per merge
-    span = "this week" if week else "today"
-    lines = [(" " + c("f7d774", "trophy room · " + span, True) + c(DIM, f" · {len(items)}" if items else " · none yet " + span), 0)]
+TRW = 36  # the narrowest a trophy room column gets
+
+def trophy_pages(items, h, w):  # -> the trophy room's columns (lists of lines, h - 1 tall) cut into pages of as many columns as fit across w
+    n, cap = max(1, w // TRW), h - 1
+    cw, cols = w // n, [[]]
+    def add(line, need=1):
+        if cols[-1] and len(cols[-1]) + need > cap: cols.append([])
+        cols[-1].append(padr(line, cw))
     for p, ts in by_project(items):
-        lines.append(("  " + c("f7d774", CUP[0]) + " " + c(FG, pname(p, len(ts), w - 10), True), 0))
+        head = "  " + c("f7d774", CUP[0]) + " " + c(FG, pname(p, len(ts), cw - 9), True)
+        add(head, 2)  # a project header never ends a column alone
         for k, (_, _, tm, name, ref) in enumerate(ts):
-            cup = c("f7d774", CUP[1]) if k == 0 else "    "
-            room = w - 11 - len(tm) - len(ref) - 2
-            lines.append(("  " + cup + " " + c("e0af68", tm) + " " + c(FG, clip(name, room)) + (c(DIM, " " + ref) if ref else ""), 1))
-    if len(lines) > h:
-        lines = lines[:h - 1]
-        while len(lines) > 1 and not lines[-1][1]: lines.pop()  # a project header left without its merges
-        left = len(items) - sum(n for _, n in lines)
-        lines.append((" " + c(DIM, f"+{left} more"), 0))
-    return [padr(l, w) for l, _ in lines] + [" " * w] * (h - len(lines))
+            if len(cols[-1]) >= cap: add("  " + c(DIM, "↳ " + clip(p or "no project", cw - 6)))  # the project carries on in the next column
+            room = cw - 9 - len(tm) - (len(ref) + 1 if ref else 0)
+            add("  " + (c("f7d774", CUP[1]) if k == 0 else "    ") + " " + c("e0af68", tm) + " " + c(FG, clip(name, room)) + (c(DIM, " " + ref) if ref else ""))
+    return [cols[i:i + n] for i in range(0, len(cols), n)] if items else [[]]
+
+def trophy_room(items, h, w, week=False, page=0):  # -> h lines of w columns: the creatures' place in the trophy view; per project a cup and "project ×N", then a line per merge, flowing across the width and paged (n / p) when they still do not fit
+    span = "this week" if week else "today"
+    pages = trophy_pages(items, h, w)
+    page = min(max(page, 0), len(pages) - 1)
+    keys = c(DIM, f" · page {page + 1}/{len(pages)} · ") + c("e0af68", "n") + c(DIM, " next ") + c("e0af68", "p") + c(DIM, " prev") if len(pages) > 1 else ""
+    lines = [" " + c("f7d774", "trophy room · " + span, True) + c(DIM, f" · {len(items)}" if items else " · none yet " + span) + keys]
+    cols, cw = pages[page], w // max(1, w // TRW)
+    lines += ["".join(col[i] if i < len(col) else " " * cw for col in cols) for i in range(h - 1)] if cols else []
+    return [padr(l, w) for l in lines] + [" " * w] * (h - len(lines))
 
 def decision_card(x, w):  # x: a worker with an open decision -> 3 lines: project and age, the status line's text, where the report / PR is
     d = x["decision"]
@@ -462,9 +473,9 @@ def panel(workers, rows, w=W, keys=""):
     while len(ks) > 1 and 5 + vis(title) + vis(mk(ks)) > w - 1: ks.pop()  # a narrow strip with "+N more" loses its last hints (never q), not its frame
     return frame(title, rows, mk(ks), w)
 
-def creatures(shown, trophies, width=W, tick=None, view=None, decs=(), week=False):  # up to eight Mochis, as many across as fit, CH rows each: sprite, two label lines, mood, hearts, bubble; trophies down the right edge
+def creatures(shown, trophies, width=W, tick=None, view=None, decs=(), week=False, page=0):  # up to eight Mochis, as many across as fit, CH rows each: sprite, two label lines, mood, hearts, bubble; trophies down the right edge
     cols, nrows, w = grid(len(shown), width)
-    if view == "t": return trophy_room(trophies, CH * nrows, w - 2, week)
+    if view == "t": return trophy_room(trophies, CH * nrows, w - 2, week, page)
     if view == "d": return decision_room(decs, CH * nrows, w - 2)
     room = w - 2 - TW
     if not shown: body = [""] * 5 + [center(c(DIM, "no workers aboard · Mochi waits for the next task"), room)] + [""] * 5
@@ -477,10 +488,10 @@ def hint(key, label, view, cur): return c("e0af68", key) + c(DIM, " back" if vie
 
 def week_hint(week): return c("e0af68", "w") + c(DIM, " today" if week else " week")  # flips the trophy window; the label names what it switches to
 
-def render(workers, trophies, width=W, tick=None, view=None, week=False):
+def render(workers, trophies, width=W, tick=None, view=None, week=False, page=0):
     shown, w = workers[:SHOWN], grid(len(workers), width)[2]
     sep = c(FRAME, " " + "─" * (w - 4))
-    rows = [""] + creatures(shown, trophies, width, tick, view, decisions_of(workers), week) + [
+    rows = [""] + creatures(shown, trophies, width, tick, view, decisions_of(workers), week, page) + [
         sep, " " + hint("t", "trophies", "t", view) + "  " + hint("d", "decisions", "d", view) + "  " + week_hint(week) + "  " +
         c("e0af68", "r") + c(DIM, " redraw  ") + c("e0af68", "q") + c(DIM, " close")]
     return panel(workers, rows, w)
@@ -493,14 +504,14 @@ def full_rows(n, width=W): return FULL_ROWS + CH * (grid(n, width)[1] - 1)
 def strip_rows(n, width=W): return STRIP_ROWS + CH * (grid(n, width)[1] - 1)  # a second row of creatures grows the strip
 def layout_for(rows, n=0, width=W): return "full" if rows >= full_rows(n, width) else "strip"
 
-def render_strip(workers, trophies, width=W, tick=None, view=None, week=False):
+def render_strip(workers, trophies, width=W, tick=None, view=None, week=False, page=0):
     shown, w = workers[:SHOWN], grid(len(workers), width)[2]
-    return panel(workers, creatures(shown, trophies, width, tick, view, decisions_of(workers), week), w,
+    return panel(workers, creatures(shown, trophies, width, tick, view, decisions_of(workers), week, page), w,
                  [c(DIM, " · ") + c("e0af68", "q") + c(DIM, " close"), c(DIM, " · ") + hint("t", "trophies", "t", view), c(DIM, " · ") + hint("d", "decisions", "d", view), c(DIM, " · ") + week_hint(week)])
 
-def draw(workers, trophies, rows, width=W, tick=None, view=None, week=False):  # -> lines for a terminal this size; never more lines than fit (that would scroll)
+def draw(workers, trophies, rows, width=W, tick=None, view=None, week=False, page=0):  # -> lines for a terminal this size; never more lines than fit (that would scroll)
     lay = render if layout_for(rows, len(workers), width) == "full" else render_strip
-    return lay(workers, trophies, width, tick, view, week)[:max(1, rows)]
+    return lay(workers, trophies, width, tick, view, week, page)[:max(1, rows)]
 
 # ---- --pin: the startup hook. Opens the pet as a strip on top of the Firstmate tab, once ----
 TITLE = "Wallie's Wardens"  # the pane label Herdr gives the plugin pane (manifest title)
@@ -598,7 +609,7 @@ def live(pet):
     signal.set_wakeup_fd(wake_w)  # a resize wakes the select below instead of waiting out the poll
     strip, anim, herdr = os.environ.get("PET_STRIP") and tiled, animate(), os.environ.get("HERDR_BIN_PATH", "herdr")
     out.write("\x1b[?1049h\x1b[?25l"); out.flush()
-    last, workers, tick, next_poll, asked, view = None, [], 0, 0, None, None
+    last, workers, tick, next_poll, asked, view, page = None, [], 0, 0, None, None, 0
     try:
         while True:
             now = time.time()
@@ -610,7 +621,7 @@ def live(pet):
                 if want != size.lines:
                     try: fit_strip(functools.partial(herdr_call, herdr), os.environ["HERDR_PANE_ID"], want)
                     except Exception: pass  # ponytail: a failed refit leaves the strip as it is; the next change retries
-            text = [to_ansi(l) for l in draw(workers, pet.trophies, size.lines, size.columns, tick if anim else None, view, pet.week)]
+            text = [to_ansi(l) for l in draw(workers, pet.trophies, size.lines, size.columns, tick if anim else None, view, pet.week, page)]
             if last is None or len(text) != len(last):  # first frame or resize: clear and draw it all
                 out.write("\x1b[H\x1b[2J" + "\n".join(text)); out.flush()
             elif text != last:  # otherwise rewrite only the lines that changed (mostly sprite rows while animating)
@@ -624,7 +635,11 @@ def live(pet):
             if key in ("q", "\x03") or key == "\x1b" and not tiled: return  # Esc starts arrow keys too: only the popup takes it
             if key == "r": last = None
             if key == "w": pet.week, next_poll = not pet.week, 0  # the next loop polls, so the trophies are recomputed at once
+            if key in ("t", "d", "w"): page = 0  # a new view or span starts on its first page
             if key in ("t", "d"): view = None if view == key else key  # same height in every view, so the strip never refits
+            if key in ("n", "p") and view == "t":  # page through trophies that do not fit
+                _, nrows, w = grid(len(workers), size.columns)
+                page = min(max(page + (1 if key == "n" else -1), 0), len(trophy_pages(pet.trophies, CH * nrows, w - 2)) - 1)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         out.write("\x1b[0m\x1b[?25h\x1b[?1049l"); out.flush()

@@ -368,12 +368,41 @@ class Panel(unittest.TestCase):
         self.assertIn("09:00 fix-x PR #7", out[3])
         self.assertIn("b ×1", out[4])
         self.assertIn("10:00 y local", out[5])
-        out = [pet.TAG.sub("", l) for l in pet.trophy_room(items, 5, 70)]  # b's header would be last: cut it, count its merge
-        self.assertIn("09:00 fix-x", out[3])
-        self.assertIn("+1 more", out[4])
-        out = [pet.TAG.sub("", l) for l in pet.trophy_room(items, 3, 70)]  # a's header without any merge is dropped too
-        self.assertIn("+3 more", out[1])
         self.assertIn("none yet today", pet.TAG.sub("", pet.trophy_room([], 3, 70)[0]))
+
+    def test_trophy_room_flows_across_the_width(self):
+        txt = lambda ls: [pet.TAG.sub("", l) for l in ls]
+        items = [(f"p{i % 3}", "t", f"{i:02d}:00", f"task{i}", "local") for i in range(12)]  # 3 projects x 4 merges = 15 lines
+        for w, _ in ((70, 1), (78, 2), (108, 3), (180, 5)):
+            out = txt(pet.trophy_room(items, 11, w))
+            self.assertEqual((len(out), {len(l) for l in out}), (11, {w}))
+            shown = " ".join(out)
+            if w >= 108: self.assertTrue(all(f"task{i}" in shown for i in range(12)), w)  # all of it at once
+        self.assertEqual(len(pet.trophy_pages(items, 11, 108)), 1)
+        self.assertEqual(len(pet.trophy_pages(items, 11, 108)[0]), 2)  # 15 lines, 10 a column: side by side, not paged
+        self.assertEqual(txt(pet.trophy_room(items, 11, 108))[2].count("task"), 2)
+        # more than fits in one column (10 lines) at 70 wide: paged, every merge on exactly one page, header says so
+        pages = pet.trophy_pages(items, 11, 70)
+        self.assertGreater(len(pages), 1)
+        seen = [i for pg in range(len(pages)) for i in range(12) if f"task{i} " in " ".join(txt(pet.trophy_room(items, 11, 70, page=pg))) + " "]
+        self.assertEqual(sorted(seen), list(range(12)))
+        self.assertIn(f"page 2/{len(pages)}", txt(pet.trophy_room(items, 11, 70, page=1))[0])
+        self.assertIn("page 1/", txt(pet.trophy_room(items, 11, 70, page=-5))[0])  # out of range clamps
+        self.assertIn(f"page {len(pages)}/", txt(pet.trophy_room(items, 11, 70, page=99))[0])
+        self.assertNotIn("page", txt(pet.trophy_room(items[:2], 11, 70))[0])
+        # a project longer than a column carries on in the next one under a "↳" line; no header ends a column alone
+        many = [("big", "t", "09:00", f"m{i}", "") for i in range(14)]
+        cols = pet.trophy_pages(many, 11, 78)[0]
+        self.assertTrue(pet.TAG.sub("", cols[1][0]).strip().startswith("↳ big"))
+        self.assertEqual(len(cols[0]), 10)
+
+    def test_trophy_room_paging_in_the_frame(self):
+        ws = [pet.main_worker(dict(agent_status="working"))]
+        items = [("demo", "t", "12:00", f"t{i}", "local") for i in range(30)]
+        for width in (80, 120, 200):
+            a, b = pet.draw(ws, items, 40, width, view="t"), pet.draw(ws, items, 40, width, view="t", page=1)
+            self.assertEqual({len(pet.TAG.sub("", l)) for l in a}, {len(pet.TAG.sub("", l)) for l in b})
+            self.assertEqual(len(a), len(pet.draw(ws, items, 40, width)))
 
     def test_room_toggle_keeps_the_height(self):
         ws = [pet.main_worker(dict(agent_status="working"))]
