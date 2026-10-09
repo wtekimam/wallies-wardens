@@ -1,5 +1,5 @@
 """python3 -m unittest test_pet  -- fixture Firstmate-style state dirs, no live home touched."""
-import json, os, re, subprocess, sys, tempfile, time, unittest, zlib
+import datetime, json, os, re, subprocess, sys, tempfile, time, unittest, zlib
 import pet
 
 NOW = 1790000000
@@ -83,16 +83,16 @@ class Decisions(unittest.TestCase):
         out = self.plain(pet.draw(ws, [], 40, view="d"))
         self.assertEqual(len(out), pet.FULL_ROWS)
         body = "\n".join(out)
-        for s in ("decisions · open · 1", "demo", "needs-decision", "waiting 5m", "found X; blocked on Y; need a choice", "PR https://x/pull/7", "d back", "t trophies"):
+        for s in ("needs you · 1", "demo", "decide", "waiting 5m", "found X; blocked on Y; need a choice", "PR https://x/pull/7", "d back", "t trophies"):
             self.assertIn(s, body)
         self.assertNotIn("demo-q", body)
         self.assertNotIn("building", body)  # the Mochis are replaced
-        self.assertIn("d decisions (1)", "\n".join(self.plain(pet.draw(ws, [], 40))))
+        self.assertIn("d needs you (1)", "\n".join(self.plain(pet.draw(ws, [], 40))))
         strip = self.plain(pet.draw(ws, [], pet.STRIP_ROWS, view="d"))
         self.assertIn("d back", strip[0])
         self.assertEqual(len(strip), pet.STRIP_ROWS)
-        self.assertIn("d decisions (1)", self.plain(pet.draw(ws, [], pet.STRIP_ROWS))[0])
-        self.assertTrue(all(len(l) == pet.W for l in strip))
+        self.assertIn("d needs you (1)", self.plain(pet.draw(ws, [], pet.STRIP_ROWS))[0])
+        self.assertTrue(all(pet.vis(l) == pet.W for l in strip))
 
     def test_count_in_hint(self):
         mk = lambda n: [self.h.read(self.h.worker(f"demo-n{i}", lines=[f"needs-decision [at={NOW - i}]: q"])) for i in range(n)]
@@ -100,13 +100,13 @@ class Decisions(unittest.TestCase):
             ws = mk(n)
             for out in (pet.draw(ws, [], 40, 156), pet.draw(ws, [], pet.STRIP_ROWS, 156)):
                 body = "\n".join(self.plain(out))
-                self.assertIn(f"d decisions ({n})" if n else "d decisions", body)
-                self.assertEqual("(" in body.split("d decisions")[1][:2], n > 0)
+                self.assertIn(f"d needs you ({n})" if n else "d needs you", body)
+                self.assertEqual("(" in body.split("d needs you")[1][:2], n > 0)
         raw = "\n".join(pet.draw(mk(1), [], 40, 156))
-        self.assertIn(pet.c("bb9af7", " decisions (1)", True), raw)  # the accent, not dim
-        self.assertNotIn(pet.c(pet.DIM, " decisions"), "\n".join(pet.draw(mk(1), [], 40, 156)))
-        self.assertIn(pet.c(pet.DIM, " decisions"), "\n".join(pet.draw(mk(0), [], 40, 156)))
-        self.assertIn("d decisions (3)", self.plain(pet.draw(mk(3), [], pet.STRIP_ROWS, 60))[0])  # tight: the count still shows, later hints drop first
+        self.assertIn(pet.c(pet.HEAD, " needs you (1)", True), raw)  # the accent, not dim
+        self.assertNotIn(pet.c(pet.DIM, " needs you"), "\n".join(pet.draw(mk(1), [], 40, 156)))
+        self.assertIn(pet.c(pet.DIM, " needs you"), "\n".join(pet.draw(mk(0), [], 40, 156)))
+        self.assertIn("d needs you (3)", self.plain(pet.draw(mk(3), [], pet.STRIP_ROWS, 60))[0])  # tight: the count still shows, later hints drop first
 
     def test_review_card(self):
         a = self.h.read(self.h.worker("demo-r", lines=[f"done [at={NOW - 300}]: ready"], pr="https://x/pull/9"))
@@ -118,10 +118,17 @@ class Decisions(unittest.TestCase):
         self.assertIsNone(m["decision"]); self.assertIsNone(n["decision"])
         self.assertEqual([x["id"] for x in pet.decisions_of([a, s, m, n])], ["demo-s", "demo-r"])  # oldest wait first
         body = "\n".join(self.plain(pet.draw([a, s], [], 40, view="d")))
-        for t in ("decisions · open · 2", "review", "waiting 15m", "PR https://x/pull/9"): self.assertIn(t, body)
+        for t in ("needs you · 2", "review", "waiting 15m", "PR https://x/pull/9"): self.assertIn(t, body)
+
+    def test_cards_lead_with_the_action(self):
+        ws = [self.h.read(self.h.worker(f"demo-{k}", lines=[f"{st} [at={NOW - i}]: x"], pr="https://x/pull/1" if st == "done" else ""))
+              for i, (k, st) in enumerate((("a", "needs-decision"), ("b", "blocked"), ("c", "done")))]
+        heads = [self.plain(pet.decision_card(x, 78))[0] for x in ws]
+        self.assertEqual([h.split()[1] for h in heads], ["decide", "unblock", "review"])
+        self.assertEqual({h.index("demo") for h in heads}, {11})  # the project lines up under any action
 
     def test_empty_and_overflow(self):
-        self.assertIn("decisions · open · none", self.plain(pet.draw([], [], 40, view="d"))[2])
+        self.assertIn("needs you · none", self.plain(pet.draw([], [], 40, view="d"))[2])
         ws = [self.h.read(self.h.worker(f"demo-t{i}", lines=[f"needs-decision [at={NOW - i}]: q{i}"])) for i in range(6)]
         out = self.plain(pet.draw(ws, [], 40, 156, view="d"))  # six Mochis fit one row at 156 columns: 11 lines
         self.assertEqual(len(out), pet.FULL_ROWS)
@@ -142,6 +149,89 @@ class Decisions(unittest.TestCase):
         self.h.worker("demo-cli", lines=[f"needs-decision [at={int(time.time())}]: pick one"], active=time.time())
         out = subprocess.run([sys.executable, pet.__file__, "--once"], env={**os.environ, "FM_HOME": self.h.root}, capture_output=True, text=True, check=True).stdout
         self.assertIn("pick one", re.sub(r"\x1b\[[0-9;]*m", "", out))
+
+class Title(unittest.TestCase):
+    def setUp(self): self.h = Home()
+    def tearDown(self): self.h.tmp.cleanup()
+
+    def plain(self, lines): return [pet.TAG.sub("", l) for l in lines]
+    def crew(self, calls=1, busy=3):
+        return ([pet.main_worker(dict(agent_status="working"))] +
+                [self.h.read(self.h.worker(f"demo-c{i}", lines=[f"needs-decision [at={NOW - i}]: q"])) for i in range(calls)] +
+                [self.h.read(self.h.worker(f"demo-b{i}", lines=[f"working [at={NOW}]: go"])) for i in range(busy)])
+
+    def test_crew_summary_not_the_name(self):
+        out = self.plain(pet.render(self.crew(), [], landed=2))
+        self.assertTrue(out[0].startswith("╭─ ⚓ 4 aboard · 1 needs you · 2 landed today ─"), out[0])  # the main session is not a worker
+        self.assertNotIn("Wallie", "\n".join(out))  # Herdr's pane label already names it
+        self.assertIn("2 need you", self.plain(pet.render(self.crew(2), []))[0])
+        self.assertTrue(self.plain(pet.render(self.crew(0, 1), []))[0].startswith("╭─ ⚓ 1 aboard ─"))  # nothing waiting, nothing landed: just who is aboard
+        self.assertTrue(self.plain(pet.render([], []))[0].startswith("╭─ ⚓ 0 aboard ─"))
+        self.assertTrue(self.plain(pet.render_strip(self.crew(), [], 240, landed=2))[0].startswith("╭─ ⚓ 4 aboard · 2 landed today ─"))  # the strip's "d needs you (1)" says it once
+
+    def test_anchor_is_two_columns(self):
+        self.assertEqual((pet.vis("⚓ 4"), pet.vis(pet.c(pet.FG, "⚓"))), (4, 2))
+        for out in (pet.render(self.crew(), [], landed=2), pet.render_strip(self.crew(), [], landed=2)):
+            self.assertEqual({pet.vis(l) for l in out}, {pet.W})
+
+    def test_tight_bar_drops_least_important_first(self):
+        crew = self.crew(1, 8)
+        bar = lambda width, **kw: self.plain(pet.render_strip(crew, [], width, landed=12, **kw))[0]
+        wide = bar(240)
+        for t in ("⚓ 9 aboard · 12 landed today", "+2 more", "q close", "d needs you (1)", "t trophies", "c log", "w week"): self.assertIn(t, wide)
+        tight = bar(80)  # 80 columns: the last hints go, then "landed today"; "t trophies" would go next
+        for t in ("⚓ 9 aboard", "+2 more", "q close", "d needs you (1)", "t trophies"): self.assertIn(t, tight)
+        for t in ("landed", "c log", "w week"): self.assertNotIn(t, tight)
+        self.assertIn("⚓ 9 aboard · 12 landed today", bar(100))  # "landed today" outlives "c log"
+        self.assertNotIn("c log", bar(100))
+        quiet = self.plain(pet.render_strip(self.crew(0, 9), [], 80, landed=12))[0]  # nothing waits: "t trophies" outlives "landed today"
+        self.assertIn("t trophies", quiet)
+        full = self.plain(pet.render(crew, [], 80, landed=12))[0]  # the full panel's hints live in the footer, so its title keeps every part
+        self.assertIn("⚓ 9 aboard · 1 needs you · 12 landed today", full)
+
+    def test_landed_counts_today_in_either_span(self):
+        with open(os.path.join(self.h.state, "fleet-ledger.jsonl"), "w") as f:
+            for task, ts in (("a-old", NOW - 3 * 86400), ("a-one", NOW - 60), ("a-two", NOW - 30)): f.write(json.dumps(dict(v=1, ts=ts, event="task.merged", task=task, via="local")) + "\n")
+        p = pet.Pet(self.h.root)
+        p.poll(NOW)
+        today = sum(datetime.date.fromtimestamp(ts) == datetime.date.fromtimestamp(NOW) for ts in (NOW - 60, NOW - 30))
+        self.assertEqual(p.landed, today)
+        p.week = False
+        p.poll(NOW)
+        self.assertEqual(p.landed, today)
+
+    def test_dividers_join_the_frame(self):
+        out = [l.replace("⚓", "⚓ ") for l in self.plain(pet.render(self.crew(), []))]  # one character a column
+        j = 1 + pet.W - 2 - pet.TW
+        self.assertEqual((out[0][j], out[-3][j], out[-3][0], out[-3][-1]), ("┬", "┴", "├", "┤"))  # the trophy column joins the top and the footer rule
+        self.assertTrue(all(l[j] == "│" for l in out[1:-3]))
+        strip = self.plain(pet.render_strip(self.crew(), []))
+        self.assertEqual(strip[-1][j], "┴")
+        for view in "tdl": self.assertNotIn("┴", "".join(self.plain(pet.render(self.crew(), [], view=view))))  # full-width views have no column
+
+    def test_mochi_grid_centred_and_frame_fills_the_pane(self):
+        out = self.plain(pet.render_strip(self.crew(0, 1), [], 80))
+        row = out[1][1:1 + pet.W - 2 - pet.TW]
+        left, right = len(row) - len(row.lstrip()), len(row) - len(row.rstrip())
+        self.assertLessEqual(abs(left - right), 3)  # the slack beside the trophy column is shared, not all on the right
+        self.assertEqual({pet.vis(l) for l in pet.render_strip(self.crew(), [], 150)}, {150})
+
+class Keys(unittest.TestCase):
+    LEFT = set("qwertasdfgzxcvb")
+
+    def test_every_hint_is_a_left_hand_key(self):
+        ws = [pet.main_worker(dict(agent_status="blocked"))]
+        bars = [pet.TAG.sub("", l) for view in (None, "t", "d", "c") for l in (pet.render(ws, [], 240, view=view)[-2], pet.render_strip(ws, [], 240, view=view)[0])]
+        keys = {k for b in bars for k in re.findall(r"(?:^|  |· )([a-z]) (?:trophies|needs you|log|week|today|redraw|close|back|prev|next)", b)}
+        self.assertEqual(keys, set("qtdcwr"))
+        self.assertTrue(keys <= self.LEFT)
+        self.assertIn("c log", bars[0])
+        pages = pet.TAG.sub("", pet.page_keys(0, 2))
+        self.assertIn("a prev s next", pages)
+        self.assertTrue(set(re.findall(r"\b([a-z]) (?:prev|next)", pages)) <= self.LEFT)
+
+    def test_old_right_hand_keys_still_work(self):
+        self.assertEqual(pet.ALIASES, dict(l="c", n="s", p="a"))
 
 class Hunger(unittest.TestCase):
     def setUp(self): self.h = Home()
@@ -177,7 +267,7 @@ class Panel(unittest.TestCase):
         self.assertIn("+2 more", out[0])
         self.assertIn("8 demo", "\n".join(out))
         self.assertNotIn("9 demo", "\n".join(out))
-        self.assertTrue(all(len(l) == pet.W for l in out), [len(l) for l in out])
+        self.assertTrue(all(pet.vis(l) == pet.W for l in out), [pet.vis(l) for l in out])
 
     def test_layout_one_to_nine(self):
         for n in range(1, 10):  # 80 columns: the trophy column leaves two Mochis across, so up to four rows
@@ -187,10 +277,10 @@ class Panel(unittest.TestCase):
             ws = [dict(id=f"demo-t{i}", project="demo", mood="busy", bubble="", sub="", age="1m", hunger=5, hn="fed", acc="cap") for i in range(n)]
             out = self.plain(pet.render_strip(ws, []))
             self.assertEqual(len(out), pet.strip_rows(n))
-            self.assertTrue(all(len(l) == pet.W for l in out), (n, [len(l) for l in out]))
+            self.assertTrue(all(pet.vis(l) == pet.W for l in out), (n, [pet.vis(l) for l in out]))
             self.assertEqual(("+1 more" in out[0]), n == 9)
-        self.assertEqual(pet.grid(8, 240), (8, 1, 8 * pet.CW + 4 + pet.TW))  # a wide pane fits all eight in one row
-        self.assertEqual(pet.grid(8, 160), (6, 2, 6 * pet.CW + 4 + pet.TW))
+        self.assertEqual(pet.grid(8, 240), (8, 1, 240))  # a wide pane fits all eight in one row; the frame fills the pane
+        self.assertEqual(pet.grid(8, 160), (6, 2, 160))
         self.assertEqual(pet.grid(3, 40), (2, 2, pet.W))  # narrower than 80 keeps the 80-column frame
         self.assertEqual(pet.layout_for(pet.FULL_ROWS, 8, 240), "full")
         self.assertEqual(pet.layout_for(pet.FULL_ROWS, 8), "strip")  # four rows need a taller pane for the full panel
@@ -320,9 +410,9 @@ class Panel(unittest.TestCase):
         self.assertEqual(len(col), 8)
         self.assertTrue(all(len(l) == pet.TW for l in col))
         self.assertIn("today: 30", col[1])
-        self.assertIn("p29 ×1", col[2])  # newest project on top
+        self.assertRegex(col[2], r"p29 +×1 $")  # newest project on top
         self.assertIn("last 12:09", col[3])
-        self.assertIn("p28 ×1", col[4])
+        self.assertRegex(col[4], r"p28 +×1 $")
         self.assertIn("+28 more", col[6])  # overflow counts projects: 30 total, 2 shown
         self.assertIn("none yet today", pet.TAG.sub("", "".join(pet.trophy_col([], 4))))
         self.assertNotIn("more", "".join(pet.TAG.sub("", l) for l in pet.trophy_col(items[:2], 8)))
@@ -368,8 +458,8 @@ class Panel(unittest.TestCase):
         self.assertEqual([(p, len(ts)) for p, ts in pet.by_project(items)], [(None, 1), ("a", 2), ("b", 1)])
         col = [pet.TAG.sub("", l) for l in pet.trophy_col(items, 12)]
         self.assertIn("today: 4", col[1])
-        self.assertIn("no project ×1", col[2])
-        self.assertIn("a ×2", col[4])
+        self.assertRegex(col[2], r"no project +×1 $")
+        self.assertRegex(col[4], r" a +×2 $")  # counts flush right, so they line up
         self.assertIn("last 11:00", col[5])  # the newest merge of the project
 
     def test_room_name_and_ref(self):
@@ -416,6 +506,7 @@ class Panel(unittest.TestCase):
         self.assertIn("page 1/", txt(pet.trophy_room(items, 11, 70, page=-5))[0])  # out of range clamps
         self.assertIn(f"page {len(pages)}/", txt(pet.trophy_room(items, 11, 70, page=99))[0])
         self.assertNotIn("page", txt(pet.trophy_room(items[:2], 11, 70))[0])
+        self.assertIn("a prev s next", txt(pet.trophy_room(items, 11, 70))[0])
         # a project longer than a column carries on in the next one under a "↳" line; no header ends a column alone
         many = [("big", "t", "09:00", f"m{i}", "") for i in range(14)]
         cols = pet.trophy_pages(many, 11, 78)[0]
@@ -596,15 +687,15 @@ class CaptainsLog(unittest.TestCase):
         p = self.fleet()
         ws = [pet.main_worker(dict(agent_status="working"))]
         for rows in (40, pet.STRIP_ROWS):
-            a, b = pet.draw(ws, [], rows), pet.draw(ws, [], rows, view="l", log=p.log)
+            a, b = pet.draw(ws, [], rows), pet.draw(ws, [], rows, view="c", log=p.log)
             self.assertEqual((len(a), {pet.vis(l) for l in b}), (len(b), {pet.W}))
             body = "\n".join(self.plain(b))
             self.assertIn("Day 2026-10-09.", body)
-            self.assertIn("l back", body)
+            self.assertIn("c back", body)
             self.assertNotIn("main session", body)  # the Mochis are replaced
-        self.assertIn("l log", "\n".join(self.plain(pet.draw(ws, [], 40))))
-        self.assertIn("l log", self.plain(pet.draw(ws, [], pet.STRIP_ROWS, 120))[0])
-        self.assertIn("l back", self.plain(pet.draw(ws * 9, [], pet.STRIP_ROWS, 60, view="l"))[0])  # tight: the open log's way back stays
+        self.assertIn("c log", "\n".join(self.plain(pet.draw(ws, [], 40))))
+        self.assertIn("c log", self.plain(pet.draw(ws, [], pet.STRIP_ROWS, 120))[0])
+        self.assertIn("c back", self.plain(pet.draw(ws * 9, [], pet.STRIP_ROWS, 60, view="c"))[0])  # tight: the open log's way back stays
 
 class MainMochi(unittest.TestCase):
     def setUp(self): self.h = Home()
@@ -679,7 +770,7 @@ class Strip(unittest.TestCase):
         lines = pet.draw(ws, p.trophies, rows)
         out = self.plain(lines)
         self.assertEqual((len(out), rows), (2 + 4 * pet.CH, pet.STRIP_ROWS + 3 * pet.CH))
-        self.assertTrue(all(len(l) == pet.W for l in out), [len(l) for l in out])
+        self.assertTrue(all(pet.vis(l) == pet.W for l in out), [pet.vis(l) for l in out])
         self.assertIn("+2 more", out[0])
         self.assertIn("q close", out[0])
         sprite = pet.creature("calling", ws[1]["acc"], pet.colour_of("demo"))
@@ -692,7 +783,7 @@ class Strip(unittest.TestCase):
         self.assertIn("7 demo", out[1 + 3 * pet.CH + 6])
         self.assertIn("trophies · today", out[1])
         self.assertIn("today: 60", out[2])
-        self.assertIn("demo ×60", out[3])  # one cup for the whole project
+        self.assertRegex(out[3], r"demo +×60 │$")  # one cup for the whole project
         self.assertIn("last 12:059", out[4])
         self.assertNotIn("more", out[5][-pet.TW:])  # a single project never overflows
         self.assertTrue(all(o[-pet.TW - 1] == "│" for o in out[1:-1]))  # the column sits at the right edge
@@ -702,7 +793,7 @@ class Strip(unittest.TestCase):
         self.assertEqual(len(out), pet.STRIP_ROWS)
         self.assertIn("no workers aboard", "\n".join(out))
         self.assertIn("none yet today", out[2])
-        self.assertTrue(all(len(l) == pet.W for l in out))
+        self.assertTrue(all(pet.vis(l) == pet.W for l in out))
 
 class Pin(unittest.TestCase):
     HOME, ROOT = "/fm", "/plugins/firstmate.pet"

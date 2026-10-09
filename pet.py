@@ -15,7 +15,7 @@ It never writes under the Firstmate home and never runs Firstmate scripts.
 
 PET_ANIMATE=0 (environment, or a line in the plugin config file) keeps the Mochis still.
 """
-import datetime, functools, json, math, os, re, sys, time, zlib
+import datetime, functools, json, math, os, re, sys, time, unicodedata, zlib
 
 POLL = 3                 # seconds between polls
 ASLEEP_SECS = 30 * 60    # no status or turn activity this long (and not calling) -> asleep
@@ -28,7 +28,9 @@ DEFAULT_HOME = os.path.expanduser("~/Documents/firstmate")
 # ---- tiny markup: {#rrggbb} fg, {@rrggbb} bg, {b} bold, {/} reset (lifted from the design build.py); {>url} opens a link, {>} closes it ----
 URL = r"https?://[!-z|~]+"  # printable ASCII without the markup's braces: nothing in it can break out of the OSC 8 sequence
 TAG = re.compile(r"\{(?:([#@])([0-9a-fA-F]{6})|(b)|(/)|>(" + URL + r")?)\}")
-FG, DIM, FRAME = "#c0caf5", "#565f89", "#3b4261"
+# one palette for every view: text, quiet text, lines; headings and what needs you; keys, numbers and times; trophies
+FG, SUB, DIM, FRAME = "#c0caf5", "#a9b1d6", "#565f89", "#3b4261"
+HEAD, KEY, GOLD, LIVE, HEART = "#bb9af7", "#e0af68", "#f7d774", "#9ece6a", "#f7768e"
 
 def parse(s):  # -> [(text, fg, bg, bold, link)]; {/} resets the colours but not the link
     segs, fg, bg, bold, ln, pos = [], None, None, False, None, 0
@@ -43,8 +45,10 @@ def parse(s):  # -> [(text, fg, bg, bold, link)]; {/} resets the colours but not
     if pos < len(s): segs.append((s[pos:], fg, bg, bold, ln))
     return segs
 
+def width(t): return len(t) if t.isascii() else sum(1 + (unicodedata.east_asian_width(ch) in "WF") for ch in t)  # ⚓ takes two columns
+
 @functools.lru_cache(maxsize=4096)  # animation redraws the same few lines over and over
-def vis(s): return sum(len(t) for t, *_ in parse(s))
+def vis(s): return sum(width(t) for t, *_ in parse(s))
 def rgb(h): return ";".join(str(int(h[i:i+2], 16)) for i in (1, 3, 5))
 
 @functools.lru_cache(maxsize=4096)
@@ -380,7 +384,7 @@ def captains_log(ledger, now):  # -> [(date, [markup word, ...])], newest day fi
             who = sorted({label(t) for t, k in d["waits"].items() if k == kind})
             if who: said.append(f"{names(who)} {(now_verbs if date == today else past_verbs)[len(who) > 1]} {rest}")
         said = " ".join(said) or "Quiet seas."
-        entries.append((date, [c("f7d774", f"Day {date.isoformat()}.", True)] + [c(FG, w) for w in said.split(" ")]))
+        entries.append((date, [c(KEY, f"Day {date.isoformat()}.", True)] + [c(FG, w) for w in said.split(" ")]))
     return entries
 
 # ---- the pet: keeps accessories stable, parties workers whose merge just got recorded, lists today's trophies ----
@@ -389,7 +393,7 @@ class Pet:
         self.home, self.list_panes = home, list_panes
         self.state = os.path.join(home, "state")
         self.ledger = Ledger(self.state)
-        self.accs, self.party, self.trophies, self.log, self.logged, self.primed, self.week = {}, {}, [], [], None, False, True
+        self.accs, self.party, self.trophies, self.log, self.logged, self.primed, self.week, self.landed = {}, {}, [], [], None, False, True, 0
 
     def poll(self, now):
         try: ids = sorted(e.name[:-5] for e in os.scandir(self.state) if e.name.endswith(".meta"))
@@ -413,6 +417,7 @@ class Pet:
         for w in workers:
             if w["id"] in self.party: w.update(mood="party", bubble="", sub="merged!", hunger=5, hn="fed")
         self.trophies = trophies_today(self.ledger.merged, now, self.week)
+        self.landed = len(self.trophies if not self.week else trophies_today(self.ledger.merged, now))  # the title's "N landed today", whichever span the trophies show
         if self.logged != (self.ledger.off, datetime.date.fromtimestamp(now)):  # rebuilt only when the ledger grows or the day turns
             self.log, self.logged = captains_log(self.ledger, now), (self.ledger.off, datetime.date.fromtimestamp(now))
         return self.main_mochi(now) + workers
@@ -423,46 +428,55 @@ class Pet:
         except Exception: return []
         return [main_worker(p)] if p else []
 
-# ---- layout: 80 columns, wider when the pane fits more cells ----
+# ---- layout: 80 columns, or the pane's width when it is wider ----
 W, CW, CH, TW = 80, 19, 11, 24  # minimum frame width; one creature cell's width and height; the trophy column's width
 MC = dict(busy="7dcfff", training="ff9e64", calling="bb9af7", sick="9ece6a", asleep="7d8fd0", party="e0af68")
 
-def grid(n, width=W):  # -> (columns, rows of creatures, frame width): as many cells across as fit beside the trophy column
+def grid(n, width=W):  # -> (columns, rows of creatures, frame width): as many cells across as fit beside the trophy column; the frame fills the pane
     cols = max(1, min(SHOWN, (max(width, W) - 4 - TW) // CW))
-    return cols, max(1, math.ceil(min(n, SHOWN) / cols)), max(W, cols * CW + 4 + TW)
+    return cols, max(1, math.ceil(min(n, SHOWN) / cols)), max(W, width)
 
-def frame(title, rows, right="", w=W):
+def frame(title, rows, right="", w=W, foot=None, col=None):  # title: markup; foot: a last row under a rule; col: the inner column of a divider that joins the rules
     inner = w - 2
     used = 3 + vis(title) + 1 + (vis(right) + 1 if right else 0)
-    top = c(FRAME, "╭─ ") + c("bb9af7", title, True) + c(FRAME, " " + "─" * (w - 1 - used)) + (" " + right if right else "") + c(FRAME, "╮")
-    return [top] + [c(FRAME, "│") + padr(r, inner) + c(FRAME, "│") for r in rows] + [c(FRAME, "╰" + "─" * inner + "╯")]
+    dash, at = "─" * (w - 1 - used), -1 if col is None else col - 3 - vis(title)  # at: the divider's place in the top's dashes
+    if 0 <= at < len(dash): dash = dash[:at] + "┬" + dash[at + 1:]  # when the title or hints sit over it, the divider just meets them
+    top = c(FRAME, "╭─ ") + title + c(FRAME, " " + dash) + (" " + right if right else "") + c(FRAME, "╮")
+    rule = lambda l, r, j: c(FRAME, l + ("─" * inner if j is None else "─" * j + "┴" + "─" * (inner - j - 1)) + r)
+    side = [c(FRAME, "│") + padr(r, inner) + c(FRAME, "│") for r in rows]
+    if foot is None: return [top] + side + [rule("╰", "╯", col)]
+    return [top] + side + [rule("├", "┤", col), c(FRAME, "│") + padr(foot, inner) + c(FRAME, "│"), rule("╰", "╯", None)]
 
-def hearts(n): return c("f7768e", "●" * n) + c(DIM, "○" * (5 - n))  # ● is solid in every terminal font; ♥ drew as an outline in Herdr
+def hearts(n): return c(HEART, "●" * n) + c(DIM, "○" * (5 - n))  # ● is solid in every terminal font; ♥ drew as an outline in Herdr
 
 def cell(i, w, tick=None):  # tick None: the still frame
     n = f"{i} "  # one column of each line stays free between cells
-    proj = c("e0af68", str(i), True) + " " + c(FG, clip(w["project"], CW - 1 - len(n)), True)
+    proj = c(KEY, str(i), True) + " " + c(FG, clip(w["project"], CW - 1 - len(n)), True)
     name, tag = short_task(w["id"], w["project"]), w.get("decision") and w["decision"]["kind"] == "needs-decision" and w["decision"]["text"]
     if tag:  # a calling Mochi says what the call is about: "task · tag" on the second label line
         name = clip(name, 8)
-        task = c("a9b1d6", name) + c("bb9af7", clip(" · " + tag, CW - 1 - len(name)))
-    else: task = c("a9b1d6", clip(name, CW - 1))
-    last = c("ffffff", f'"{w["bubble"]}"', True) if w["bubble"] else c(DIM, w["sub"])
+        task = c(SUB, name) + c(HEAD, clip(" · " + tag, CW - 1 - len(name)))
+    else: task = c(SUB, clip(name, CW - 1))
+    last = c(FG, f'"{w["bubble"]}"', True) if w["bubble"] else c(DIM, w["sub"])
     f = 0 if tick is None else ((tick // 2 if w["mood"] == "asleep" else tick) + i) % 2  # neighbours out of step; asleep at half speed
     body = creature(w["mood"], w.get("acc"), w.get("colour", colour_of(w["project"])), f)
-    return [center(x, CW) for x in body] + [center(proj, CW), center(task, CW), center(c(MC[w["mood"]], w["mood"]) + c(DIM, f" · {w['age']}"), CW),
-            center(c(DIM, w["hn"]) if w["hunger"] is None else hearts(w["hunger"]) + c(DIM, " " + w["hn"]), CW), center(last, CW)]
+    mid = lambda x: center(x, CW - 1) + " "  # the sprite and its labels share one centre line; the last column stays free between cells
+    return [mid(x) for x in body] + [mid(proj), mid(task), mid(c(MC[w["mood"]], w["mood"]) + c(DIM, f" · {w['age']}")),
+            mid(c(DIM, w["hn"]) if w["hunger"] is None else hearts(w["hunger"]) + c(DIM, " " + w["hn"])), mid(last)]
 
 def by_project(items):  # -> [(project or None, its trophies newest first)], the project with the newest merge first
     groups = {}
     for t in reversed(items): groups.setdefault(t[0], []).append(t)
     return list(groups.items())
 
-def pname(p, n, room): return clip(p or "no project", room - len(f" ×{n}")) + f" ×{n}"
+def cup_name(p, n, room, bold=False, flush=True):  # "project ×N" in room columns; flush: the count at the right edge, so a column of counts lines up
+    k = f"×{n}"
+    name = clip(p or "no project", room - len(k) - 1)
+    return c(FG, name, bold) + " " * (room - len(name) - len(k) if flush else 1) + c(GOLD, k)
 
 def trophy_col(items, h, week=False):  # -> h lines of TW columns: heading, the total, then a cup with "project ×N" per project on 2 lines, "+N more" when they overflow
     span = "this week" if week else "today"
-    lines = [c(FRAME, "│ ") + c("f7d774", "trophies · " + span, True)]
+    lines = [c(FRAME, "│ ") + c(HEAD, "trophies · " + span, True)]
     if not items:
         lines.append(c(FRAME, "│ ") + c(DIM, "none yet " + span))
         return [padr(l, TW) for l in (lines + [c(FRAME, "│")] * h)[:h]]
@@ -471,8 +485,8 @@ def trophy_col(items, h, week=False):  # -> h lines of TW columns: heading, the 
     fit = (h - 2) // 2
     if len(groups) > fit: fit = (h - 3) // 2  # keep a line for "+N more"
     for p, ts in groups[:fit]:
-        lines.append(c(FRAME, "│") + c("f7d774", " " + CUP[0]) + " " + c(FG, pname(p, len(ts), TW - 8)))
-        lines.append(c(FRAME, "│") + c("f7d774", " " + CUP[1]) + " " + c(DIM, f"last {ts[0][2]}"))
+        lines.append(c(FRAME, "│") + c(GOLD, " " + CUP[0]) + " " + cup_name(p, len(ts), TW - 8))
+        lines.append(c(FRAME, "│") + c(GOLD, " " + CUP[1]) + " " + c(DIM, "last ") + c(KEY, ts[0][2]))
     if len(groups) > fit:
         lines.append(c(FRAME, "│ ") + c(DIM, f"+{len(groups) - fit} more"))
     return [padr(l, TW) for l in (lines + [c(FRAME, "│")] * h)[:h]]
@@ -486,21 +500,21 @@ def trophy_pages(items, h, w):  # -> the trophy room's columns (lists of lines, 
         if cols[-1] and len(cols[-1]) + need > cap: cols.append([])
         cols[-1].append(padr(line, cw))
     for p, ts in by_project(items):
-        head = "  " + c("f7d774", CUP[0]) + " " + c(FG, pname(p, len(ts), cw - 9), True)
+        head = "  " + c(GOLD, CUP[0]) + " " + cup_name(p, len(ts), cw - 9, True, False)
         add(head, 2)  # a project header never ends a column alone
         for k, (_, _, tm, name, ref, *url) in enumerate(ts):
             if len(cols[-1]) >= cap: add("  " + c(DIM, "↳ " + clip(p or "no project", cw - 6)))  # the project carries on in the next column
             room = cw - 9 - len(tm) - (len(ref) + 1 if ref else 0)
-            add("  " + (c("f7d774", CUP[1]) if k == 0 else "    ") + " " + c("e0af68", tm) + " " + c(FG, clip(name, room)) + (" " + link(url and url[0], c(DIM, ref)) if ref else ""))
+            add("  " + (c(GOLD, CUP[1]) if k == 0 else "    ") + " " + c(KEY, tm) + " " + c(FG, clip(name, room)) + (" " + link(url and url[0], c(DIM, ref)) if ref else ""))
     return [cols[i:i + n] for i in range(0, len(cols), n)] if items else [[]]
 
-def page_keys(page, n): return c(DIM, f" · page {page + 1}/{n} · ") + c("e0af68", "n") + c(DIM, " next ") + c("e0af68", "p") + c(DIM, " prev") if n > 1 else ""
+def page_keys(page, n): return c(DIM, f" · page {page + 1}/{n} · ") + c(KEY, "a") + c(DIM, " prev ") + c(KEY, "s") + c(DIM, " next") if n > 1 else ""
 
 def trophy_room(items, h, w, week=False, page=0):  # -> h lines of w columns: the creatures' place in the trophy view; per project a cup and "project ×N", then a line per merge, flowing across the width and paged (n / p) when they still do not fit
     span = "this week" if week else "today"
     pages = trophy_pages(items, h, w)
     page = min(max(page, 0), len(pages) - 1)
-    lines = [" " + c("f7d774", "trophy room · " + span, True) + c(DIM, f" · {len(items)}" if items else " · none yet " + span) + page_keys(page, len(pages))]
+    lines = [" " + c(HEAD, "trophy room · " + span, True) + c(DIM, f" · {len(items)}" if items else " · none yet " + span) + page_keys(page, len(pages))]
     cols, cw = pages[page], w // max(1, w // TRW)
     lines += ["".join(col[i] if i < len(col) else " " * cw for col in cols) for i in range(h - 1)] if cols else []
     return [padr(l, w) for l in lines] + [" " * w] * (h - len(lines))
@@ -528,13 +542,15 @@ def log_pages(entries, h, w):  # -> pages of h - 1 lines: the entries wrapped to
 def log_room(entries, h, w, page=0):  # -> h lines of w columns: the creatures' place in the log view; newest day first, paged (n / p) when it does not fit
     pages = log_pages(entries, h, w)
     page = min(max(page, 0), len(pages) - 1)
-    lines = [" " + c("e0af68", "captain's log", True) + c(DIM, f" · {num(len(entries), 'day')}" if entries else " · nothing logged yet") + page_keys(page, len(pages))]
+    lines = [" " + c(HEAD, "captain's log", True) + c(DIM, f" · {num(len(entries), 'day')}" if entries else " · nothing logged yet") + page_keys(page, len(pages))]
     return [padr(l, w) for l in (lines + pages[page])[:h]] + [" " * w] * (h - 1 - len(pages[page]))
 
-def decision_card(x, w):  # x: a worker with an open decision -> 3 lines: project and age, the status line's text, where the report / PR is
+ACTION = {"needs-decision": ("decide", MC["calling"]), "review": ("review", "7dcfff"), "blocked": ("unblock", MC["sick"])}  # what each open item asks of the captain
+
+def decision_card(x, w):  # x: a worker that needs the captain -> 3 lines: the action (decide / review / unblock), project, task and wait; the status line's text; where the report / PR is
     d = x["decision"]
-    k = c({"needs-decision": "bb9af7", "review": "7dcfff"}.get(d["kind"], "9ece6a"), d["kind"])
-    head = " " + c("f7d774", "●") + " " + c(FG, x["project"], True) + c(DIM, " · " + short_task(x["id"], x["project"]) + " · ") + k + c(DIM, " · waiting " + d["waiting"])
+    act, col = ACTION[d["kind"]]
+    head = " " + c(col, "●") + " " + c(col, act.ljust(7), True) + " " + c(FG, x["project"], True) + c(DIM, " · " + short_task(x["id"], x["project"]) + " · waiting " + d["waiting"])
     parts = [p for p in (d["report"] and ("report " + d["report"], ""), d["pr"] and ("PR " + d["pr"], d["pr"])) if p]
     parts = [(t + "  " * (i < len(parts) - 1), u) for i, (t, u) in enumerate(parts)] or [("no report or PR yet", "")]
     return [head, "   " + c(FG, clip(d["text"] or "(no details)", w - 5)), "   " + clip_links(parts, w - 5, DIM)]
@@ -548,8 +564,8 @@ def clip_links(parts, n, col):  # parts: [(text, url or "")] -> their text in co
 
 def decisions_of(workers): return sorted((x for x in workers if x.get("decision")), key=lambda x: x["decision"]["at"])  # longest waiting first
 
-def decision_room(decs, h, w):  # -> h lines of w columns: the creatures' place in the decisions view; one card each, oldest first, "+N more" when they overflow
-    lines = [" " + c("bb9af7", "decisions · open", True) + c(DIM, f" · {len(decs)}" if decs else " · none")]
+def decision_room(decs, h, w):  # -> h lines of w columns: the creatures' place in the needs-you view; one card each, oldest first, "+N more" when they overflow
+    lines = [" " + c(HEAD, "needs you", True) + c(DIM, f" · {len(decs)}" if decs else " · none")]
     shown = 0
     for i, d in enumerate(decs):
         card = decision_card(d, w)
@@ -558,42 +574,52 @@ def decision_room(decs, h, w):  # -> h lines of w columns: the creatures' place 
     if shown < len(decs): lines.append(" " + c(DIM, f"+{len(decs) - shown} more"))
     return [padr(l, w) for l in lines[:h]] + [" " * w] * (h - len(lines))
 
-def panel(workers, rows, w=W, keys=""):
+def crew(workers, landed):  # -> the title's parts, most important first: who is aboard, how many need the captain, how many landed today (Herdr's pane label already names the pet)
+    n, d = sum(not x.get("main") for x in workers), len(decisions_of(workers))
+    return [c(FG, f"⚓ {n} aboard", True), d and c(HEAD, f"{d} need{'s' * (d == 1)} you", True), landed and c(GOLD, f"{landed} landed today", True)]
+
+def panel(workers, rows, w=W, keys=(), landed=0, foot=None, col=None):
     more = len(workers) - SHOWN
-    n = sum(not w.get("main") for w in workers)
-    title = f"Wallie's Wardens · {n} worker{'s' if n != 1 else ''}"
-    mk = lambda ks: (c("e0af68", f"+{more} more", True) + c(DIM, " · ") if more > 0 else "") + c("9ece6a", "●") + c(DIM, f" live {POLL}s") + "".join(ks)
-    ks = list(keys)
-    while len(ks) > 1 and 5 + vis(title) + vis(mk(ks)) > w - 1: ks.pop()  # a narrow strip with "+N more" loses its last hints (never q), not its frame
-    return frame(title, rows, mk(ks), w)
+    parts, ks = crew(workers, landed), list(keys)
+    if any(" needs you (" in k for k in ks): parts[1] = ""  # the strip's "d needs you (N)" already says it on this line
+    title = lambda: c(DIM, " · ").join(p for p in parts if p)
+    mk = lambda: (c(KEY, f"+{more} more", True) + c(DIM, " · ") if more > 0 else "") + c(LIVE, "●") + c(DIM, f" live {POLL}s") + "".join(ks)
+    # a tight bar drops the least important first: the hints after the third, "landed today", the third hint, "needs you", the second hint; never "aboard", "+N more" or q
+    for xs, i in [(ks, i) for i in range(len(ks) - 1, 2, -1)] + [(parts, 2), (ks, 2), (parts, 1), (ks, 1)]:
+        if 5 + vis(title()) + vis(mk()) <= w - 1: break
+        if i < len(xs): xs[i] = ""
+    return frame(title(), rows, mk(), w, foot, col)
 
 def creatures(shown, trophies, width=W, tick=None, view=None, decs=(), week=False, page=0, log=()):  # up to eight Mochis, as many across as fit, CH rows each: sprite, two label lines, mood, hearts, bubble; trophies down the right edge
     cols, nrows, w = grid(len(shown), width)
     if view == "t": return trophy_room(trophies, CH * nrows, w - 2, week, page)
     if view == "d": return decision_room(decs, CH * nrows, w - 2)
-    if view == "l": return log_room(log, CH * nrows, w - 2, page)
+    if view == "c": return log_room(log, CH * nrows, w - 2, page)
     room = w - 2 - TW
     if not shown: body = [""] * 5 + [center(c(DIM, "no workers aboard · Mochi waits for the next task"), room)] + [""] * 5
     else:
         cells = [cell(i, x, tick) for i, x in enumerate(shown, 1)]
-        body = ["  " + "".join(col[i] for col in cells[k:k + cols]) for k in range(0, len(cells), cols) for i in range(CH)]
+        lead = " " * max(2, (room - cols * CW) // 2)  # the grid sits centred in the room beside the trophy column
+        body = [lead + "".join(col[i] for col in cells[k:k + cols]) for k in range(0, len(cells), cols) for i in range(CH)]
     return [padr(l, room) + t for l, t in zip(body, trophy_col(trophies, len(body), week))]
 
-def hint(key, label, view, cur): return c("e0af68", key) + c(DIM, " back" if view == cur else " " + label)  # the key's footer hint: "back" while its view is open
+def hint(key, label, view, cur): return c(KEY, key) + c(DIM, " back" if view == cur else " " + label)  # the key's footer hint: "back" while its view is open
 
-def dec_hint(view, n):  # "d decisions (N)" in the decision accent while anything waits; plain and dim at zero
-    if view == "d" or not n: return hint("d", "decisions", "d", view)
-    return c("e0af68", "d") + c("bb9af7", f" decisions ({n})", True)
+def dec_hint(view, n):  # "d needs you (N)" in the heading colour while anything waits; plain and dim at zero
+    if view == "d" or not n: return hint("d", "needs you", "d", view)
+    return c(KEY, "d") + c(HEAD, f" needs you ({n})", True)
 
-def week_hint(week): return c("e0af68", "w") + c(DIM, " today" if week else " week")  # flips the trophy window; the label names what it switches to
+def week_hint(week): return c(KEY, "w") + c(DIM, " today" if week else " week")  # flips the trophy window; the label names what it switches to
 
-def render(workers, trophies, width=W, tick=None, view=None, week=False, page=0, log=()):
+def divider(w, view): return w - 2 - TW if view is None else None  # the trophy column's left edge, which joins the frame's rules; the other views have none
+
+def render(workers, trophies, width=W, tick=None, view=None, week=False, page=0, log=(), landed=0):
     shown, w = workers[:SHOWN], grid(len(workers), width)[2]
-    sep = c(FRAME, " " + "─" * (w - 4))
-    rows = [""] + creatures(shown, trophies, width, tick, view, decisions_of(workers), week, page, log) + [
-        sep, " " + hint("t", "trophies", "t", view) + "  " + dec_hint(view, len(decisions_of(workers))) + "  " + hint("l", "log", "l", view) + "  " + week_hint(week) + "  " +
-        c("e0af68", "r") + c(DIM, " redraw  ") + c("e0af68", "q") + c(DIM, " close")]
-    return panel(workers, rows, w)
+    col, decs = divider(w, view), decisions_of(workers)
+    rows = [" " * col + c(FRAME, "│") if col is not None else ""] + creatures(shown, trophies, width, tick, view, decs, week, page, log)
+    foot = (" " + hint("t", "trophies", "t", view) + "  " + dec_hint(view, len(decs)) + "  " + hint("c", "log", "c", view) + "  " + week_hint(week) + "  " +
+            c(KEY, "r") + c(DIM, " redraw  ") + c(KEY, "q") + c(DIM, " close"))
+    return panel(workers, rows, w, (), landed, foot, col)
 
 # ---- strip layout: the same Mochi rows and trophy column without the spacing rows, for the pinned strip ----
 FULL_ROWS = 16   # the full panel's height with one row of creatures; anything shorter gets the strip
@@ -603,17 +629,17 @@ def full_rows(n, width=W): return FULL_ROWS + CH * (grid(n, width)[1] - 1)
 def strip_rows(n, width=W): return STRIP_ROWS + CH * (grid(n, width)[1] - 1)  # a second row of creatures grows the strip
 def layout_for(rows, n=0, width=W): return "full" if rows >= full_rows(n, width) else "strip"
 
-def render_strip(workers, trophies, width=W, tick=None, view=None, week=False, page=0, log=()):
+def render_strip(workers, trophies, width=W, tick=None, view=None, week=False, page=0, log=(), landed=0):
     shown, w = workers[:SHOWN], grid(len(workers), width)[2]
     decs = decisions_of(workers)
-    keys = [c(DIM, " · ") + x for x in (c("e0af68", "q") + c(DIM, " close"), hint("t", "trophies", "t", view), dec_hint(view, len(decs)), hint("l", "log", "l", view), week_hint(week))]
-    if decs and view != "d": keys.insert(1, keys.pop(2))  # something waits: "d decisions (N)" outlives "t trophies" when the bar is tight
-    if view == "l": keys.insert(1, keys.pop(3))  # the open log's "l back" outlives the rest
-    return panel(workers, creatures(shown, trophies, width, tick, view, decs, week, page, log), w, keys)
+    keys = [c(DIM, " · ") + x for x in (c(KEY, "q") + c(DIM, " close"), hint("t", "trophies", "t", view), dec_hint(view, len(decs)), hint("c", "log", "c", view), week_hint(week))]
+    if decs and view != "d": keys.insert(1, keys.pop(2))  # something waits: "d needs you (N)" outlives "t trophies" when the bar is tight
+    if view == "c": keys.insert(1, keys.pop(3))  # the open log's "c back" outlives the rest
+    return panel(workers, creatures(shown, trophies, width, tick, view, decs, week, page, log), w, keys, landed, col=divider(w, view))
 
-def draw(workers, trophies, rows, width=W, tick=None, view=None, week=False, page=0, log=()):  # -> lines for a terminal this size; never more lines than fit (that would scroll)
+def draw(workers, trophies, rows, width=W, tick=None, view=None, week=False, page=0, log=(), landed=0):  # -> lines for a terminal this size; never more lines than fit (that would scroll)
     lay = render if layout_for(rows, len(workers), width) == "full" else render_strip
-    return lay(workers, trophies, width, tick, view, week, page, log)[:max(1, rows)]
+    return lay(workers, trophies, width, tick, view, week, page, log, landed)[:max(1, rows)]
 
 # ---- --pin: the startup hook. Opens the pet as a strip on top of the Firstmate tab, once ----
 TITLE = "Wallie's Wardens"  # the pane label Herdr gives the plugin pane (manifest title)
@@ -696,6 +722,8 @@ def setting(key, default):  # the environment, then a KEY=value line in the plug
 def fm_home(): return os.path.expanduser(setting("FM_HOME", DEFAULT_HOME))
 def animate(): return setting("PET_ANIMATE", "1").lower() not in ("0", "off", "no", "false")
 
+ALIASES = dict(l="c", n="s", p="a")  # the old right-hand keys still work, unadvertised: every hint names a left-hand key
+
 def focus_cmds(w, herdr="herdr"):  # the CLI has no pane focus by id: focus the worker's workspace, then its tab
     return [[herdr, "workspace", "focus", w["ws"]]] * bool(w.get("ws")) + [[herdr, "tab", "focus", w["tab"]]] * bool(w.get("tab"))
 
@@ -723,7 +751,7 @@ def live(pet):
                 if want != size.lines:
                     try: fit_strip(functools.partial(herdr_call, herdr), os.environ["HERDR_PANE_ID"], want)
                     except Exception: pass  # ponytail: a failed refit leaves the strip as it is; the next change retries
-            text = [to_ansi(l) for l in draw(workers, pet.trophies, size.lines, size.columns, tick if anim else None, view, pet.week, page, pet.log)]
+            text = [to_ansi(l) for l in draw(workers, pet.trophies, size.lines, size.columns, tick if anim else None, view, pet.week, page, pet.log, pet.landed)]
             if last is None or len(text) != len(last):  # first frame or resize: clear and draw it all
                 out.write("\x1b[H\x1b[2J" + "\n".join(text)); out.flush()
             elif text != last:  # otherwise rewrite only the lines that changed (mostly sprite rows while animating)
@@ -734,15 +762,16 @@ def live(pet):
             if wake_r in ready: os.read(wake_r, 64); last = None
             if fd not in ready: continue
             key = os.read(fd, 1).decode(errors="ignore")
+            key = ALIASES.get(key, key)
             if key in ("q", "\x03") or key == "\x1b" and not tiled: return  # Esc starts arrow keys too: only the popup takes it
             if key == "r": last = None
             if key == "w": pet.week, next_poll = not pet.week, 0  # the next loop polls, so the trophies are recomputed at once
-            if key in ("t", "d", "l", "w"): page = 0  # a new view or span starts on its first page
-            if key in ("t", "d", "l"): view = None if view == key else key  # same height in every view, so the strip never refits
-            if key in ("n", "p") and view in ("t", "l"):  # page through trophies or log entries that do not fit
+            if key in ("t", "d", "c", "w"): page = 0  # a new view or span starts on its first page
+            if key in ("t", "d", "c"): view = None if view == key else key  # same height in every view, so the strip never refits
+            if key in ("s", "a") and view in ("t", "c"):  # page through trophies or log entries that do not fit
                 _, nrows, w = grid(len(workers), size.columns)
                 pages = trophy_pages(pet.trophies, CH * nrows, w - 2) if view == "t" else log_pages(pet.log, CH * nrows, w - 2)
-                page = min(max(page + (1 if key == "n" else -1), 0), len(pages) - 1)
+                page = min(max(page + (1 if key == "s" else -1), 0), len(pages) - 1)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         out.write("\x1b[0m\x1b[?25h\x1b[?1049l"); out.flush()
@@ -753,7 +782,8 @@ def main(argv):
     pet = Pet(fm_home(), lambda: herdr_call(herdr, "pane", "list")["panes"])
     if "--once" in argv:
         lay = render_strip if "--strip" in argv else render
-        print("\n".join(to_ansi(l) for l in lay(pet.poll(time.time()), pet.trophies)))
+        ws = pet.poll(time.time())
+        print("\n".join(to_ansi(l) for l in lay(ws, pet.trophies, week=pet.week, landed=pet.landed)))
         return 0
     try: live(pet)
     except KeyboardInterrupt: pass
