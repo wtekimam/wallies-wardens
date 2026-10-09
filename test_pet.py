@@ -382,7 +382,7 @@ class Panel(unittest.TestCase):
                     dict(v=1, ts=NOW - 1, event="task.merged", task="a-two", via="local"))
         p = pet.Pet(self.h.root)
         p.poll(NOW)
-        self.assertEqual([t[3:] for t in p.trophies], [("one", "PR #42"), ("a-two", "local")])
+        self.assertEqual([t[3:] for t in p.trophies], [("one", "PR #42", "https://github.com/o/r/pull/42"), ("a-two", "local", "")])
 
     def test_trophy_room(self):
         items = [("a", "x", "09:00", "fix-x", "PR #7"), ("b", "y", "10:00", "y", "local"), ("a", "z", "11:00", "z", "PR #9")]
@@ -467,6 +467,144 @@ class Panel(unittest.TestCase):
         h = self.plain([pet.hearts(3)])[0]
         self.assertEqual((h, pet.vis(pet.hearts(3))), ("●●●○○", 5))
         self.assertNotIn("♥", pet.hearts(5))
+
+class Links(unittest.TestCase):
+    URL = "https://github.com/o/r/pull/42"
+    OPEN, CLOSE = f"\x1b]8;;{URL}\x1b\\", "\x1b]8;;\x1b\\"
+
+    def test_link_takes_no_columns(self):
+        s = "a " + pet.link(self.URL, pet.c(pet.DIM, "PR #42")) + " b"
+        self.assertEqual(pet.vis(s), len("a PR #42 b"))
+        self.assertEqual(pet.TAG.sub("", s), "a PR #42 b")
+        self.assertEqual(pet.vis(pet.padr(s, 20)), 20)
+        self.assertEqual(pet.vis(pet.center(s, 20)), 20)
+        out = pet.to_ansi(s)
+        self.assertEqual(out.count(self.OPEN), 1)
+        self.assertEqual(re.sub(r"\x1b\]8;;[^\x1b]*\x1b\\|\x1b\[[0-9;]*m", "", out), "a PR #42 b")  # OSC 8 wraps only the PR text
+        self.assertEqual(sorted([out.index(self.OPEN), out.index("PR #42"), out.index(self.CLOSE), out.index(" b")]),
+                         [out.index(self.OPEN), out.index("PR #42"), out.index(self.CLOSE), out.index(" b")])
+        self.assertTrue(pet.to_ansi("{>" + self.URL + "}open").endswith(self.CLOSE + "\x1b[0m"))  # a link never runs past its line
+
+    def test_only_plain_urls_link(self):
+        for bad in ("", None, "javascript:alert(1)", "https://x/pull/1\x1b]8;;evil", "https://x/{b}", "https://x /pull/1"):
+            self.assertEqual(pet.link(bad, "PR"), "PR", bad)
+
+    def test_decision_card_keeps_its_text(self):
+        d = dict(kind="review", text="ready", waiting="5m", at=0, report="/fm/data/x/report.md", pr=self.URL)
+        x = dict(id="demo-x", project="demo", decision=d)
+        for w in (120, 60, 40):  # roomy, the URL cut short, the PR cut off entirely
+            line = pet.decision_card(x, w)[2]
+            plain = "   " + pet.clip(f"report {d['report']}  PR {self.URL}", w - 5)
+            self.assertEqual(pet.TAG.sub("", line), plain)
+            self.assertEqual(pet.vis(line), len(plain))
+            self.assertEqual(self.OPEN in pet.to_ansi(line), "PR" in plain, w)  # whatever shows of the PR opens the full URL
+        self.assertEqual(pet.TAG.sub("", pet.decision_card(dict(x, decision=dict(d, report="", pr="")), 80)[2]).strip(), "no report or PR yet")
+
+    def test_trophy_room_links_prs_with_a_url_only(self):
+        items = [("a", "x", "09:00", "fix-x", "PR #42", self.URL), ("a", "y", "10:00", "y", "PR #7", ""), ("a", "z", "11:00", "z", "local", "")]
+        lines = pet.trophy_room(items, 6, 70)
+        self.assertEqual({pet.vis(l) for l in lines}, {70})
+        out = "\n".join(pet.to_ansi(l) for l in lines)
+        self.assertEqual(out.count("\x1b]8;;https"), 1)  # PR #7 has no URL in its record: plain text, never a guessed link
+        self.assertIn(self.OPEN + "PR #42" + "\x1b[0m" + self.CLOSE, out)
+        self.assertIn("09:00 fix-x PR #42", pet.TAG.sub("", "".join(lines)))
+
+    def test_frames_stay_square_with_links(self):
+        h = Home()
+        try:
+            ws = [h.read(h.worker("demo-l", lines=[f"done [at={NOW}]: ready"], pr=self.URL))]
+            items = [("demo", "l", "12:00", "l", "PR #42", self.URL)] * 3
+            for rows, width, view in ((40, 80, "d"), (40, 80, "t"), (pet.STRIP_ROWS, 80, "d"), (pet.STRIP_ROWS, 156, "t")):
+                out = pet.draw(ws, items, rows, width, view=view)
+                self.assertEqual(len({pet.vis(l) for l in out}), 1, (rows, width, view))
+                self.assertIn("\x1b]8;;https", "".join(pet.to_ansi(l) for l in out))
+        finally: h.tmp.cleanup()
+
+class CaptainsLog(unittest.TestCase):
+    def setUp(self): self.h = Home()
+    def tearDown(self): self.h.tmp.cleanup()
+
+    def at(self, d, hr=12, m=0): return int(time.mktime((2026, 10, d, hr, m, 0, 0, 0, -1)))
+    def plain(self, lines): return [pet.TAG.sub("", l) for l in lines]
+
+    def ledger(self, *recs):
+        with open(os.path.join(self.h.state, "fleet-ledger.jsonl"), "a") as f: f.write("".join(json.dumps(dict(v=1, **r)) + "\n" for r in recs))
+
+    def st(self, d, hr, task, state, text="x"): return dict(ts=self.at(d, hr), event="task.status", task=task, state=state, key=None, text=text)
+
+    def fleet(self):
+        a = self.at
+        self.ledger(dict(ts=a(8, 9), event="task.dispatched", task="kara-x", project="/p/client-kara"),
+                    dict(ts=a(8, 9), event="task.dispatched", task="portal-y", project="kara-portal"),
+                    self.st(8, 10, "kara-x", "needs-decision"), self.st(8, 11, "kara-x", "needs-decision", "again"),  # asked twice: one decision
+                    self.st(8, 12, "portal-y", "blocked"), self.st(8, 13, "portal-y", "failed"),
+                    self.st(8, 14, "kara-x", "working"),  # a later line closes the ask without an answer
+                    self.st(8, 15, "kara-x", "needs-decision", "token?"),
+                    self.st(9, 9, "kara-x", "resolved"), self.st(9, 9, "kara-x", "resolved"),  # a repeated record counts once
+                    self.st(9, 10, "kara-x", "done"), self.st(9, 10, "kara-x", "done", "again"),
+                    dict(ts=a(9, 11), event="task.merged", task="kara-x", via="pr", pr="https://github.com/o/client-kara/pull/25"),
+                    dict(ts=a(9, 12), event="task.merged", task="portal-y", via="pr", pr="https://github.com/o/kara-portal/pull/4"),
+                    dict(ts=a(9, 13), event="task.merged", task="pet-z", via="local"), dict(ts=a(9, 14), event="task.merged", task="pet-w", via="local"),
+                    dict(ts=a(9, 15), event="task.dispatched", task="kara-v", project="client-kara"),
+                    self.st(9, 16, "kara-v", "needs-decision"), self.st(9, 17, "portal-q", "blocked"),
+                    dict(ts=a(7, 10), event="task.dispatched", task="gone-u", project="garmin"), self.st(7, 11, "gone-u", "paused"),
+                    dict(ts=a(1, 10), event="task.cleaned_up", task="gone-u"))
+        p = pet.Pet(self.h.root)
+        p.poll(a(9, 18))
+        return p
+
+    def test_one_entry_per_day_newest_first(self):
+        p = self.fleet()
+        text = [(d.isoformat(), pet.TAG.sub("", " ".join(ws))) for d, ws in p.log]
+        self.assertEqual([d for d, _ in text], ["2026-10-09", "2026-10-08", "2026-10-07", "2026-10-01"])
+        self.assertEqual(text[0][1], "Day 2026-10-09. One task set sail. Two PRs landed (client-kara #25, kara-portal #4). Two local branches landed (pet-z, pet-w). "
+                                     "One task reported done. One decision raised, one answered. One blocker hit. client-kara waits on your call. portal-q is stuck on a blocker.")
+        self.assertEqual(text[1][1], "Day 2026-10-08. Two tasks set sail. Two decisions raised. One blocker hit. One task ran aground (kara-portal). client-kara waited on your call.")
+        self.assertEqual(text[2][1], "Day 2026-10-07. One task set sail.")
+        self.assertEqual(text[3][1], "Day 2026-10-01. Quiet seas.")  # records, but nothing the log tells
+
+    def test_prs_link_and_locals_count(self):
+        p = self.fleet()
+        words = p.log[0][1]
+        self.assertIn("\x1b]8;;https://github.com/o/client-kara/pull/25\x1b\\", "".join(pet.to_ansi(w) for w in words))
+        self.ledger(dict(ts=self.at(9, 17), event="task.merged", task="pet-z", via="local"))
+        p.poll(self.at(9, 18))
+        self.assertIn("Three local branches landed (pet-z ×2, pet-w).", pet.TAG.sub("", " ".join(p.log[0][1])))
+        log = p.log
+        p.poll(self.at(9, 19))
+        self.assertIs(p.log, log)  # nothing new in the ledger: not rebuilt
+        p.poll(self.at(10, 9))
+        self.assertIn("client-kara waited on your call.", pet.TAG.sub("", " ".join(p.log[0][1])))  # a new day: yesterday's waits are past tense
+
+    def test_view_fits_and_pages(self):
+        p = self.fleet()
+        for w in (60, 78, 154):  # the frame's room is never under 78; 60 still fits the heading
+            pages = pet.log_pages(p.log, 11, w)
+            for pg in range(len(pages)):
+                out = pet.log_room(p.log, 11, w, pg)
+                self.assertEqual((len(out), {pet.vis(l) for l in out}), (11, {w}))
+            seen = " ".join(" ".join(self.plain(pet.log_room(p.log, 11, w, pg))) for pg in range(len(pages)))
+            self.assertTrue(all(f"Day 2026-10-0{d}" in seen for d in (1, 7, 8, 9)), w)  # every day on some page
+        self.assertEqual(len(pet.log_pages(p.log, 30, 154)), 1)
+        self.assertGreater(len(pet.log_pages(p.log, 11, 60)), 1)
+        self.assertIn("page 2/", self.plain(pet.log_room(p.log, 11, 60, 1))[0])
+        self.assertIn("captain's log · four days", self.plain(pet.log_room(p.log, 11, 78))[0])
+        self.assertIn("nothing logged yet", self.plain(pet.log_room([], 11, 78))[0])
+        self.assertEqual(pet.wrap([pet.c(pet.FG, "x" * 50)], 10), [pet.c(pet.FG, "x" * 9 + "…")])  # too long for any line: cut, not overflowing
+
+    def test_view_in_the_frame(self):
+        p = self.fleet()
+        ws = [pet.main_worker(dict(agent_status="working"))]
+        for rows in (40, pet.STRIP_ROWS):
+            a, b = pet.draw(ws, [], rows), pet.draw(ws, [], rows, view="l", log=p.log)
+            self.assertEqual((len(a), {pet.vis(l) for l in b}), (len(b), {pet.W}))
+            body = "\n".join(self.plain(b))
+            self.assertIn("Day 2026-10-09.", body)
+            self.assertIn("l back", body)
+            self.assertNotIn("main session", body)  # the Mochis are replaced
+        self.assertIn("l log", "\n".join(self.plain(pet.draw(ws, [], 40))))
+        self.assertIn("l log", self.plain(pet.draw(ws, [], pet.STRIP_ROWS, 120))[0])
+        self.assertIn("l back", self.plain(pet.draw(ws * 9, [], pet.STRIP_ROWS, 60, view="l"))[0])  # tight: the open log's way back stays
 
 class MainMochi(unittest.TestCase):
     def setUp(self): self.h = Home()
