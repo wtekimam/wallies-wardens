@@ -4,7 +4,8 @@
 Read-only view of a Firstmate home. The main session's mood is the agent_status of the Herdr pane whose cwd is the home
 (`herdr pane list`, once per poll). Per worker it reads only state/<id>.meta, the tail of
 state/<id>.status, the mtime of state/<id>.turn-ended and the mtime of state/<id>.inbox/handled/.
-An open decision (a worker's newest unresolved needs-decision or blocked line) is shown from the same status tail; its report is data/<id>/report.md when that exists, its PR the meta file's pr=.
+What needs the captain (a worker's newest unresolved needs-decision or blocked line, or a done line waiting on review) is shown from the same status tail;
+its title and hold come from data/backlog.md, its report is data/<id>/report.md when that exists, its PR the meta file's pr=.
 Trophies and the captain's log (one entry a day, from templates) come from state/fleet-ledger.jsonl (read by byte offset, only new lines each poll).
 Every PR shown is an OSC 8 hyperlink to its URL; Herdr opens it on Ctrl-click.
 It never writes under the Firstmate home and never runs Firstmate scripts.
@@ -29,7 +30,7 @@ DEFAULT_HOME = os.path.expanduser("~/Documents/firstmate")
 URL = r"https?://[!-z|~]+"  # printable ASCII without the markup's braces: nothing in it can break out of the OSC 8 sequence
 TAG = re.compile(r"\{(?:([#@])([0-9a-fA-F]{6})|(b)|(/)|>(" + URL + r")?)\}")
 # one palette for every view: text, quiet text, lines; headings and what needs you; keys, numbers and times; trophies
-FG, SUB, DIM, FRAME = "#c0caf5", "#a9b1d6", "#565f89", "#3b4261"
+FG, SUB, DIM, FRAME = "#c0caf5", "#a9b1d6", "#8089b3", "#3b4261"  # DIM: 5:1 on Tokyo Night's background, readable for times and secondary text
 HEAD, KEY, GOLD, LIVE, HEART = "#bb9af7", "#e0af68", "#f7d774", "#9ece6a", "#f7768e"
 
 def parse(s):  # -> [(text, fg, bg, bold, link)]; {/} resets the colours but not the link
@@ -229,6 +230,20 @@ def status_state(lines):
         state, text, at = verb, body, int(stamp.group(1)) if stamp else at
     return state, text, at
 
+TITLED = re.compile(r"- \[.\] (\S+) - (.+?)(?= \((?:repo|kind|hold|hold-kind|hold-until): | \(since \d|$)")
+HELD = re.compile(r"\(hold-until: ([^)\s]+)\)")
+
+@functools.lru_cache(maxsize=4)
+def backlog(path, stamp):  # -> {task id: (title, hold-until or "")} from the home's data/backlog.md; stamp (its mtime) keys the cache, so it is read again only when it changes
+    out = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m, h = TITLED.match(line), HELD.search(line)
+                if m: out[m[1]] = (re.sub(r"^[\w-]+: ", "", m[2].strip()), h[1] if h else "")  # "garmin: post-race rehaul" -> "post-race rehaul": the card names the project
+    except OSError: pass
+    return out
+
 def read_worker(state_dir, wid, now):
     meta = read_meta(os.path.join(state_dir, wid + ".meta"))
     status_path = os.path.join(state_dir, wid + ".status")
@@ -242,9 +257,10 @@ def read_worker(state_dir, wid, now):
     bubble, sub, dec = "", "", None
     review = st == "done" and not MERGED.search(text) and (meta.get("pr") or kind == "scout")  # waiting on the captain's review: a decision of its own kind
     if st in ("needs-decision", "blocked") or review:  # an open decision: its newest unresolved line (status_state already applied resolved/captain-held)
-        report = os.path.join(os.path.dirname(state_dir), "data", wid, "report.md")
+        report, bl = os.path.join(os.path.dirname(state_dir), "data", wid, "report.md"), os.path.join(os.path.dirname(state_dir), "data", "backlog.md")
+        title, hold = backlog(bl, mtime(bl)).get(wid, ("", ""))
         dec = dict(kind="review" if review else st, text=text, waiting=age(max(0, now - (at or last_active))), at=at or last_active,
-                   report=report if os.path.exists(report) else "", pr=meta.get("pr", ""))
+                   report=report if os.path.exists(report) else "", pr=meta.get("pr", ""), title=title, hold=hold)
     if st in ("blocked", "failed"): mood, sub = "sick", st
     elif st == "needs-decision": mood, bubble = "calling", "your call!"
     elif st == "done" and MERGED.search(text): mood, sub = "party", "merged!"
@@ -462,7 +478,9 @@ def cell(i, w, tick=None):  # tick None: the still frame
     body = creature(w["mood"], w.get("acc"), w.get("colour", colour_of(w["project"])), f)
     mid = lambda x: center(x, CW - 1) + " "  # the sprite and its labels share one centre line; the last column stays free between cells
     return [mid(x) for x in body] + [mid(proj), mid(task), mid(c(MC[w["mood"]], w["mood"]) + c(DIM, f" · {w['age']}")),
-            mid(c(DIM, w["hn"]) if w["hunger"] is None else hearts(w["hunger"]) + c(DIM, " " + w["hn"])), mid(last)]
+            mid(c(DIM, w["hn"]) if w["hunger"] is None else hearts(w["hunger"]) + c(DIM, " " + clip(hunger_note(w["hn"]), CW - 7))), mid(last)]
+
+def hunger_note(hn): return hn if len(hn) <= CW - 7 else hn.replace("waiting ", "")  # "waiting 4d 13h" outgrows the cell beside five hearts: the hearts already say it waits
 
 def by_project(items):  # -> [(project or None, its trophies newest first)], the project with the newest merge first
     groups = {}
@@ -547,13 +565,24 @@ def log_room(entries, h, w, page=0):  # -> h lines of w columns: the creatures' 
 
 ACTION = {"needs-decision": ("decide", MC["calling"]), "review": ("review", "7dcfff"), "blocked": ("unblock", MC["sick"])}  # what each open item asks of the captain
 
-def decision_card(x, w):  # x: a worker that needs the captain -> 3 lines: the action (decide / review / unblock), project, task and wait; the status line's text; where the report / PR is
+PULL = re.compile(r"https?://[^\s{}]+/pull/(\d+)[^\s{}]*")
+
+def decision_card(x, w):  # x: a worker that needs the captain -> 3 lines: the action, project and what the work is; what to do (the question, blocker, or "review & merge PR #n" and its status); the wait, PR, report and hold
     d = x["decision"]
     act, col = ACTION[d["kind"]]
-    head = " " + c(col, "●") + " " + c(col, act.ljust(7), True) + " " + c(FG, x["project"], True) + c(DIM, " · " + short_task(x["id"], x["project"]) + " · waiting " + d["waiting"])
-    parts = [p for p in (d["report"] and ("report " + d["report"], ""), d["pr"] and ("PR " + d["pr"], d["pr"])) if p]
-    parts = [(t + "  " * (i < len(parts) - 1), u) for i, (t, u) in enumerate(parts)] or [("no report or PR yet", "")]
-    return [head, "   " + c(FG, clip(d["text"] or "(no details)", w - 5)), "   " + clip_links(parts, w - 5, DIM)]
+    lead = " " + c(col, "●") + " " + c(col, act.ljust(7), True) + " " + c(FG, x["project"], True) + c(DIM, " · ")
+    head = lead + c(FG, clip(d.get("title") or short_task(x["id"], x["project"]), max(1, w - 1 - vis(lead))))
+    n = re.search(r"/pull/(\d+)", d["pr"])
+    ref = f"PR #{n[1]}" if n else "PR" if d["pr"] else ""
+    text = re.sub(r"\bPR (PR #\d+)", r"\1", PULL.sub(lambda m: "PR #" + m[1], d["text"] or ""))  # a raw PR URL reads as "PR #n"
+    if d["kind"] == "review":  # its PR shows once, as the thing to review; what is left of the line is its status
+        rest = " ".join(text.replace(ref, " ").split()).strip(" ·-:,") if ref else text
+        ask = [("review & merge ", ""), (ref, d["pr"])] if ref else [("read the report", "")]
+        todo = ask + [(" · " + rest, "")] * bool(rest)
+    else: todo = [(text or "(no details)", "")]
+    more = [("waiting " + d["waiting"], "")] + [(" · ", ""), (ref, d["pr"])] * bool(ref and d["kind"] != "review")
+    more += [(" · report " + os.path.join(*d["report"].split(os.sep)[-3:]), "")] * bool(d["report"]) + [(" · on hold to " + d.get("hold", ""), "")] * bool(d.get("hold"))
+    return [head, "   " + clip_links(todo, w - 5, FG), "   " + clip_links(more, w - 5, DIM)]
 
 def clip_links(parts, n, col):  # parts: [(text, url or "")] -> their text in col, clipped to n columns like clip(), each part linked to its url over what shows of it
     cut, out, i = clip("".join(t for t, _ in parts), n), "", 0

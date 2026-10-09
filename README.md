@@ -63,7 +63,12 @@ Press `d` for what needs you: it swaps the Mochis for a full-width list of cards
 | `unblock` | its newest unresolved `blocked` line |
 | `review` | a `done` line waiting on your review (the worker has a `pr=` in its meta file, or is a scout) that isn't merged |
 
-The hint reads `d needs you (N)` in the heading colour while N > 0, and plain dim `d needs you` at none. Each card shows the action, project, task and how long it has waited, the line's text clipped to the width, and the report (`data/<id>/report.md`, when it exists) and PR (`pr=` in the meta file, as a link) when there are any. No scrolling: what doesn't fit ends in `+N more`, and an empty list says `none`. `d` again returns to the Mochis. Wardens only shows these; answer them in chat with Firstmate.
+The hint reads `d needs you (N)` in the heading colour while N > 0, and plain dim `d needs you` at none. Each card has three lines, each cut to the width:
+1. the action, the project and what the work is: the task's title from the home's `data/backlog.md` (without a leading `project:`), else the short task name
+2. what to do: for `decide` and `unblock`, the status line's text; for `review`, `review & merge PR #<n>` (or `read the report` for a scout) and what is left of the `done` line, such as `checks green`. A PR URL in the text reads as `PR #<n>`.
+3. `waiting 4d 13h`, then the PR (`pr=` in the meta file) when line 2 doesn't already show it, the report (`data/<id>/report.md`, when it exists) and `on hold to <date>` (the backlog's `hold-until`) when there are any.
+
+Every PR shows once, as a short `PR #<n>` link to its URL. No scrolling: what doesn't fit ends in `+N more`, and an empty list says `none`. `d` again returns to the Mochis. Wardens only shows these; answer them in chat with Firstmate.
 A Mochi that is calling about a decision also gets a short tag on its second label line: `task · <decision text>`, cut to fit.
 Press `c` for the captain's log: it swaps the Mochis for one entry per day the ledger has records for, newest day first, wrapped to the pane width (see Rules). When the entries don't fit, `a` and `s` page through them. `c` again returns to the Mochis.
 The footer, under a rule that joins the frame, shows `t trophies`, `d needs you (N)`, `c log`, `w today` (`w week` once toggled) (`back` for the open view), `r redraw` and `q close`.
@@ -108,6 +113,7 @@ Every 3 seconds, for each `state/<id>.meta` in the Firstmate home, it reads:
 - the last 8 KB of `state/<id>.status`
 - the mtime of `state/<id>.turn-ended` and of `state/<id>.inbox/handled/`
 - whether `data/<id>/report.md` exists, only for a worker that needs you
+- `data/backlog.md`, for the title and `hold-until` of a worker that needs you, read again only when its mtime changes
 - `state/fleet-ledger.jsonl`, for trophies and the captain's log (see below). It remembers a byte offset, so each poll parses only the lines appended since the last, and it stops at a half-written last line until its newline arrives.
   A missing file, blank or malformed lines, and unknown events or members are ignored.
   A truncated file starts the trophies over.
@@ -146,10 +152,10 @@ Its mood comes from that pane's `agent_status`, not from status files:
 
 It has no hearts (the line reads `main session`), no accessory rotation (always the collar).
 
-**Hunger:** five solid hearts (●, hollow ○ when lost). They drain by one every 10 minutes, and only while the worker is calling (waiting on you). A new handled inbox message fills them again. That covers your prompts and Firstmate's, including while you are away. A worker that stops calling is also full again. Nothing else drains hunger.
+**Hunger:** five solid hearts (●, hollow ○ when lost), then `fed` or `waiting 25m` (just `4d 13h` when the word would not fit the cell). They drain by one every 10 minutes, and only while the worker is calling (waiting on you). A new handled inbox message fills them again. That covers your prompts and Firstmate's, including while you are away. A worker that stops calling is also full again. Nothing else drains hunger.
 
 **Look:** every worker is the Mochi from the approved design, in every layout. The test suite checks each mood, colour and accessory against it.
-The frame has rounded corners. Every view shares one palette (Tokyo Night): headings, the title's `needs you` and the calling tag in violet; key letters, label numbers, times and dates in amber; cups and their counts in gold; names in light text, task names a shade quieter, moods and card actions in their mood colours, everything else dim, lines in the frame colour.
+The frame has rounded corners. Every view shares one palette (Tokyo Night): headings, the title's `needs you` and the calling tag in violet; key letters, label numbers, times and dates in amber; cups and their counts in gold; names in light text, task names a shade quieter, moods and card actions in their mood colours, everything else in a dim that still reads at 5:1 on the dark background, lines in the frame colour.
 
 **Colours and accessories:** the main session is blue, a ninth colour no project gets, with an orange collar so it shows. Each project gets one of eight colours from a stable hash of its name. Workers in the same project share the colour.
 Every worker wears an accessory, given in this order within its project: collar, scarf, cap, sunglasses, mask, then round again.
@@ -183,7 +189,7 @@ Projects are named the same way as for trophies, else the task id is used.
 A decision stays open until a `resolved` or `captain-held` line, any later status line of that task, its merge, or its cleanup (`task.cleaned_up`). Asking it again while it is open does not count as a new one.
 Repeated status records (same task, time, state and text) count once.
 
-**Links:** every PR Wardens shows is an OSC 8 terminal hyperlink to the full PR URL: the needs-you card's PR (from `pr=` in the meta file), the trophy room's `PR #<n>` and the log's `#<n>` (from the ledger record's `pr`). The text and its width don't change.
+**Links:** every PR Wardens shows is an OSC 8 terminal hyperlink to the full PR URL: the needs-you card's `PR #<n>` (from `pr=` in the meta file, or a PR URL in its status line), the trophy room's `PR #<n>` and the log's `#<n>` (from the ledger record's `pr`). The text and its width don't change.
 In Herdr, Ctrl-click opens it (on macOS too while Herdr captures the mouse, as Herdr's docs describe). In a plain terminal that supports OSC 8, use that terminal's link click, often Cmd-click. A terminal without OSC 8 shows the same text, not clickable.
 A merge record with no PR URL is never linked, and only plain `http(s)://` URLs are.
 

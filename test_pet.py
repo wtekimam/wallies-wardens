@@ -77,13 +77,23 @@ class Decisions(unittest.TestCase):
         d = self.h.read(wid)["decision"]
         self.assertEqual((d["report"], d["pr"]), (os.path.join(self.h.root, "data", wid, "report.md"), "https://x/pull/7"))
 
+    def test_backlog_title_and_hold(self):
+        os.makedirs(os.path.join(self.h.root, "data"))
+        with open(os.path.join(self.h.root, "data", "backlog.md"), "w") as f:
+            f.write("# Backlog\n## In flight\n- [ ] demo-r - garmin: post-race rehaul (incl. load) (repo: g) (kind: task) (since 2026-10-01) (hold: x) (hold-kind: captain) (hold-until: 2026-10-25)\n"
+                    "- [ ] demo-s - why the chart is empty (repo: m) (kind: scout) (since 2026-10-09)\n  - [ ] not-a-task - indented\n")
+        r = self.h.read(self.h.worker("demo-r", lines=[f"done [at={NOW}]: PR https://x/pull/9 checks green"], pr="https://x/pull/9"))["decision"]
+        s = self.h.read(self.h.worker("demo-s", kind="scout", lines=[f"done [at={NOW}]: report"]))["decision"]
+        n = self.h.read(self.h.worker("demo-n", lines=[f"needs-decision [at={NOW}]: q"]))["decision"]
+        self.assertEqual([(x["title"], x["hold"]) for x in (r, s, n)], [("post-race rehaul (incl. load)", "2026-10-25"), ("why the chart is empty", ""), ("", "")])
+
     def test_view(self):
         wid = self.h.worker("demo-l", lines=[f"needs-decision [at={NOW - 300}]: found X; blocked on Y; need a choice"], pr="https://x/pull/7")
         ws = [self.h.read(wid), self.h.read(self.h.worker("demo-q", lines=[f"working [at={NOW}]: go"]))]
         out = self.plain(pet.draw(ws, [], 40, view="d"))
         self.assertEqual(len(out), pet.FULL_ROWS)
         body = "\n".join(out)
-        for s in ("needs you · 1", "demo", "decide", "waiting 5m", "found X; blocked on Y; need a choice", "PR https://x/pull/7", "d back", "t trophies"):
+        for s in ("needs you · 1", "demo", "decide", "waiting 5m", "found X; blocked on Y; need a choice", "waiting 5m · PR #7", "d back", "t trophies"):
             self.assertIn(s, body)
         self.assertNotIn("demo-q", body)
         self.assertNotIn("building", body)  # the Mochis are replaced
@@ -118,7 +128,7 @@ class Decisions(unittest.TestCase):
         self.assertIsNone(m["decision"]); self.assertIsNone(n["decision"])
         self.assertEqual([x["id"] for x in pet.decisions_of([a, s, m, n])], ["demo-s", "demo-r"])  # oldest wait first
         body = "\n".join(self.plain(pet.draw([a, s], [], 40, view="d")))
-        for t in ("needs you · 2", "review", "waiting 15m", "PR https://x/pull/9"): self.assertIn(t, body)
+        for t in ("needs you · 2", "review & merge PR #9 · ready", "read the report · report ready", "waiting 15m"): self.assertIn(t, body)
 
     def test_cards_lead_with_the_action(self):
         ws = [self.h.read(self.h.worker(f"demo-{k}", lines=[f"{st} [at={NOW - i}]: x"], pr="https://x/pull/1" if st == "done" else ""))
@@ -208,6 +218,12 @@ class Title(unittest.TestCase):
         strip = self.plain(pet.render_strip(self.crew(), []))
         self.assertEqual(strip[-1][j], "┴")
         for view in "tdl": self.assertNotIn("┴", "".join(self.plain(pet.render(self.crew(), [], view=view))))  # full-width views have no column
+
+    def test_long_wait_stays_in_its_cell(self):
+        for waited in (5 * 60, 2 * 3600, 4 * 86400 + 13 * 3600):
+            x = self.h.read(self.h.worker(f"demo-w{waited}", lines=[f"needs-decision [at={NOW - waited}]: q"], active=NOW - waited))
+            self.assertEqual({pet.vis(l) for l in pet.cell(1, x)}, {pet.CW})
+        self.assertIn("●●●●● 4d 13h", pet.TAG.sub("", pet.cell(1, dict(x, hunger=5))[9]))
 
     def test_mochi_grid_centred_and_frame_fills_the_pane(self):
         out = self.plain(pet.render_strip(self.crew(0, 1), [], 80))
@@ -580,16 +596,26 @@ class Links(unittest.TestCase):
         for bad in ("", None, "javascript:alert(1)", "https://x/pull/1\x1b]8;;evil", "https://x/{b}", "https://x /pull/1"):
             self.assertEqual(pet.link(bad, "PR"), "PR", bad)
 
-    def test_decision_card_keeps_its_text(self):
-        d = dict(kind="review", text="ready", waiting="5m", at=0, report="/fm/data/x/report.md", pr=self.URL)
+    def test_review_card_says_what_and_links_the_pr_once(self):
+        d = dict(kind="review", text=f"PR {self.URL} checks green", waiting="4d 13h", at=0, report="/fm/data/x/report.md", pr=self.URL,
+                 title="post-race training-engine rehaul", hold="2026-10-25")
         x = dict(id="demo-x", project="demo", decision=d)
-        for w in (120, 60, 40):  # roomy, the URL cut short, the PR cut off entirely
-            line = pet.decision_card(x, w)[2]
-            plain = "   " + pet.clip(f"report {d['report']}  PR {self.URL}", w - 5)
-            self.assertEqual(pet.TAG.sub("", line), plain)
-            self.assertEqual(pet.vis(line), len(plain))
-            self.assertEqual(self.OPEN in pet.to_ansi(line), "PR" in plain, w)  # whatever shows of the PR opens the full URL
-        self.assertEqual(pet.TAG.sub("", pet.decision_card(dict(x, decision=dict(d, report="", pr="")), 80)[2]).strip(), "no report or PR yet")
+        lines = pet.decision_card(x, 120)
+        self.assertEqual([pet.TAG.sub("", l) for l in lines], [" ● review  demo · post-race training-engine rehaul", "   review & merge PR #42 · checks green",
+                                                               "   waiting 4d 13h · report data/x/report.md · on hold to 2026-10-25"])
+        out = "".join(pet.to_ansi(l) for l in lines)
+        self.assertEqual(out.count(self.OPEN), 1)  # the PR once, as a short link to the full URL
+        self.assertIn(self.OPEN + "PR #42" + self.CLOSE, out)
+        self.assertNotIn(self.URL, pet.TAG.sub("", "".join(lines)))
+        for w in (60, 40, 24):  # narrow: every line is cut to the width, never past it
+            for l in pet.decision_card(x, w): self.assertLessEqual(pet.vis(l), w)
+        bare = pet.TAG.sub("", "\n".join(pet.decision_card(dict(x, decision=dict(d, report="", pr="", title="", hold="", text="report ready")), 80)))
+        self.assertEqual(bare, " ● review  demo · x\n   read the report · report ready\n   waiting 4d 13h")  # a scout: no PR, the short task name
+
+    def test_decide_card_keeps_its_question(self):
+        d = dict(kind="needs-decision", text=f"ship A or B? see {self.URL}", waiting="5m", at=0, report="", pr=self.URL)
+        lines = [pet.TAG.sub("", l) for l in pet.decision_card(dict(id="demo-x", project="demo", decision=d), 80)]
+        self.assertEqual(lines[1:], ["   ship A or B? see PR #42", "   waiting 5m · PR #42"])
 
     def test_trophy_room_links_prs_with_a_url_only(self):
         items = [("a", "x", "09:00", "fix-x", "PR #42", self.URL), ("a", "y", "10:00", "y", "PR #7", ""), ("a", "z", "11:00", "z", "local", "")]
