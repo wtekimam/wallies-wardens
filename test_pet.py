@@ -210,6 +210,22 @@ class Title(unittest.TestCase):
         p.poll(NOW)
         self.assertEqual(p.landed, today)
 
+    def test_held_worker_is_hidden_until_released(self):
+        os.makedirs(os.path.join(self.h.root, "data"))
+        bl = os.path.join(self.h.root, "data", "backlog.md")
+        for wid in ("demo-h", "demo-u", "demo-t"): self.h.worker(wid, lines=[f"working [at={NOW}]: go"])
+        def ids():
+            return sorted(w["id"] for w in pet.Pet(self.h.root).poll(NOW))
+        def write(held, until):
+            with open(bl, "w") as f:
+                f.write(f"- [ ] demo-h - held one (repo: d) (kind: task){' (hold: x) (hold-kind: captain)' if held else ''}\n- [ ] demo-u - plain (repo: d) (kind: task)\n"
+                        f"- [ ] demo-t - dated (repo: d) (kind: task) (hold: y) (hold-kind: captain) (hold-until: 2026-10-25)\n" if until else
+                        f"- [ ] demo-h - held one (repo: d) (kind: task){' (hold: x) (hold-kind: captain)' if held else ''}\n- [ ] demo-u - plain (repo: d) (kind: task)\n- [ ] demo-t - dated (repo: d) (kind: task)\n")
+        write(True, True)
+        self.assertEqual(ids(), ["demo-u"])  # held and hold-until both hidden, the unheld one shown
+        write(False, False)
+        self.assertEqual(ids(), ["demo-h", "demo-t", "demo-u"])  # released: they are back
+
     def test_dividers_join_the_frame(self):
         out = [l.replace("⚓", "⚓ ") for l in self.plain(pet.render(self.crew(), []))]  # one character a column
         j = 1 + pet.W - 2 - pet.TW

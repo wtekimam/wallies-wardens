@@ -232,15 +232,16 @@ def status_state(lines):
 
 TITLED = re.compile(r"- \[.\] (\S+) - (.+?)(?= \((?:repo|kind|hold|hold-kind|hold-until): | \(since \d|$)")
 HELD = re.compile(r"\(hold-until: ([^)\s]+)\)")
+HOLD = re.compile(r"\(hold(?:-until)?: ")  # the captain's hold marker, with or without a date
 
 @functools.lru_cache(maxsize=4)
-def backlog(path, stamp):  # -> {task id: (title, hold-until or "")} from the home's data/backlog.md; stamp (its mtime) keys the cache, so it is read again only when it changes
+def backlog(path, stamp):  # -> {task id: (title, hold-until or "", held)} from the home's data/backlog.md; stamp (its mtime) keys the cache, so it is read again only when it changes
     out = {}
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 m, h = TITLED.match(line), HELD.search(line)
-                if m: out[m[1]] = (re.sub(r"^[\w-]+: ", "", m[2].strip()), h[1] if h else "")  # "garmin: post-race rehaul" -> "post-race rehaul": the card names the project
+                if m: out[m[1]] = (re.sub(r"^[\w-]+: ", "", m[2].strip()), h[1] if h else "", bool(HOLD.search(line)))  # "garmin: post-race rehaul" -> "post-race rehaul": the card names the project
     except OSError: pass
     return out
 
@@ -254,11 +255,12 @@ def read_worker(state_dir, wid, now):
     spawn = meta.get("spawn_gen", "")[1:].split(".")[0]
     born = int(spawn) if spawn.isdigit() else mtime(os.path.join(state_dir, wid + ".meta"))
 
+    bl = os.path.join(os.path.dirname(state_dir), "data", "backlog.md")
+    title, hold, held = backlog(bl, mtime(bl)).get(wid, ("", "", False))
     bubble, sub, dec = "", "", None
     review = st == "done" and not MERGED.search(text) and (meta.get("pr") or kind == "scout")  # waiting on the captain's review: a decision of its own kind
     if st in ("needs-decision", "blocked") or review:  # an open decision: its newest unresolved line (status_state already applied resolved/captain-held)
-        report, bl = os.path.join(os.path.dirname(state_dir), "data", wid, "report.md"), os.path.join(os.path.dirname(state_dir), "data", "backlog.md")
-        title, hold = backlog(bl, mtime(bl)).get(wid, ("", ""))
+        report = os.path.join(os.path.dirname(state_dir), "data", wid, "report.md")
         dec = dict(kind="review" if review else st, text=text, waiting=age(max(0, now - (at or last_active))), at=at or last_active,
                    report=report if os.path.exists(report) else "", pr=meta.get("pr", ""), title=title, hold=hold)
     if st in ("blocked", "failed"): mood, sub = "sick", st
@@ -277,7 +279,7 @@ def read_worker(state_dir, wid, now):
     project = os.path.basename(meta.get("project", "").rstrip("/")) or "?"
     return dict(id=wid, project=project, kind=kind, mood=mood, bubble=bubble, sub=sub, born=born,
                 age=age(now - born), hunger=hunger, hn=hn, ws=meta.get("herdr_workspace_id"), tab=meta.get("herdr_tab_id"),
-                pane=meta.get("herdr_pane_id"), decision=dec)
+                pane=meta.get("herdr_pane_id"), decision=dec, held=held)
 
 def age(secs):
     m = int(secs // 60)
@@ -416,8 +418,9 @@ class Pet:
         except OSError: ids = []
         workers = []
         for wid in ids:
-            try: workers.append(read_worker(self.state, wid, now))
-            except OSError: pass  # removed between scandir and read
+            try: w = read_worker(self.state, wid, now)
+            except OSError: continue  # removed between scandir and read
+            if not w["held"]: workers.append(w)  # a captain-held worker is parked: out of the strip, its totals and its cards
         workers.sort(key=lambda w: (w["born"], w["id"]))
         live = {w["id"]: w["project"] for w in workers}
         for wid in [k for k in self.accs if k not in live]: del self.accs[wid]
