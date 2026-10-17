@@ -241,11 +241,10 @@ class Title(unittest.TestCase):
             self.assertEqual({pet.vis(l) for l in pet.cell(1, x)}, {pet.CW})
         self.assertIn("●●●●● 4d 13h", pet.TAG.sub("", pet.cell(1, dict(x, hunger=5))[9]))
 
-    def test_mochi_grid_centred_and_frame_fills_the_pane(self):
-        out = self.plain(pet.render_strip(self.crew(0, 1), [], 80))
-        row = out[1][1:1 + pet.W - 2 - pet.TW]
-        left, right = len(row) - len(row.lstrip()), len(row) - len(row.rstrip())
-        self.assertLessEqual(abs(left - right), 3)  # the slack beside the trophy column is shared, not all on the right
+    def test_mochi_grid_starts_at_the_left_and_frame_fills_the_pane(self):
+        label = lambda w: self.plain(pet.render_strip(self.crew(0, 1), [], w))[1 + 6].index("1 main")
+        self.assertEqual({label(w) for w in (80, 150, 272)}, {label(80)})  # a wide pane does not push two Mochis towards its middle
+        self.assertLessEqual(label(80), 1 + 2 + pet.CW // 2)
         self.assertEqual({pet.vis(l) for l in pet.render_strip(self.crew(), [], 150)}, {150})
 
 class Keys(unittest.TestCase):
@@ -565,12 +564,29 @@ class Panel(unittest.TestCase):
         self.assertIn("t back", pet.TAG.sub("", pet.draw(ws, items, pet.STRIP_ROWS, view="t")[0]))
         self.assertIn("t trophies", pet.TAG.sub("", pet.draw(ws, items, pet.STRIP_ROWS)[0]))
 
+    def pixels(self, lines):  # sprite markup -> its half-cell pixels, one colour (or ".") each, whatever glyphs draw them
+        rows = []
+        for line in lines:
+            top, bot = [], []
+            for t, fg, bg, bold, ln, rev in pet.parse(line):
+                for ch in t:
+                    a, b = {" ": (None, None), "█": (fg, fg), "▀": (fg, bg), "▄": (bg, fg)}[ch]
+                    if rev: a, b = b, a  # a reversed ▀ shows the background on top and its colour below
+                    top.append(a or "."); bot.append(b or ".")
+            rows += [" ".join(top), " ".join(bot)]
+        return "\n".join(rows)
+
     def test_sprites_match_the_agreed_mochi(self):
-        # crc32 of every mood x colour x accessory (frame 0) as drawn by the approved design (herdr-pet-tamagotchi-alts/build.py),
+        # crc32 of every mood x colour x accessory (frame 0) pixel as drawn by the approved design (herdr-pet-tamagotchi-alts/build.py),
         # except the teal collar, red instead of cyan so it shows. A change here means the pet no longer looks like the Mochi the captain picked.
-        s = "\n".join("\n".join(pet.creature(m, a, i)) for m in pet.MC for i in range(8) for a in [None] + pet.ACCS)
-        self.assertEqual(zlib.crc32(s.encode()), 2099815327)
+        s = "\n".join(self.pixels(pet.creature(m, a, i)) for m in pet.MC for i in range(8) for a in [None] + pet.ACCS)
+        self.assertEqual(zlib.crc32(s.encode()), 1808506160)
         self.assertTrue(all(len(pet.creature(m)) == 6 for m in pet.MC))
+
+    def test_split_cells_all_use_the_upper_half(self):  # ▀ and ▄ round differently in an odd-height cell (Ghostty at 8 x 17): mixed, a line's edges step by a pixel
+        drawn = "".join(pet.TAG.sub("", l) for m in pet.MC for i in range(len(pet.PALS)) for a in [None] + pet.ACCS for f in (0, 1) for l in pet.creature(m, a, i, f))
+        self.assertEqual(set(drawn), {" ", "▀", "█"})
+        self.assertEqual(pet.to_ansi("{#ffb454}{v}▀{/}"), "\x1b[0;7;38;2;255;180;84m▀\x1b[0m")
 
     def test_focus_cmds(self):
         self.assertEqual(pet.focus_cmds(dict(ws="w1", tab="w1:t2"), "h"), [["h", "workspace", "focus", "w1"], ["h", "tab", "focus", "w1:t2"]])
