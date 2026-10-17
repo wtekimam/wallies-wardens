@@ -26,24 +26,25 @@ ANIM = 0.5               # seconds between animation frames (status files are st
 SHOWN = 8                # creatures on screen; the rest become "+N more"
 DEFAULT_HOME = os.path.expanduser("~/Documents/firstmate")
 
-# ---- tiny markup: {#rrggbb} fg, {@rrggbb} bg, {b} bold, {/} reset (lifted from the design build.py); {>url} opens a link, {>} closes it ----
+# ---- tiny markup: {#rrggbb} fg, {@rrggbb} bg, {b} bold, {v} reverse, {/} reset (lifted from the design build.py); {>url} opens a link, {>} closes it ----
 URL = r"https?://[!-z|~]+"  # printable ASCII without the markup's braces: nothing in it can break out of the OSC 8 sequence
-TAG = re.compile(r"\{(?:([#@])([0-9a-fA-F]{6})|(b)|(/)|>(" + URL + r")?)\}")
+TAG = re.compile(r"\{(?:([#@])([0-9a-fA-F]{6})|(b)|(/)|>(" + URL + r")?|(v))\}")
 # one palette for every view: text, quiet text, lines; headings and what needs you; keys, numbers and times; trophies
 FG, SUB, DIM, FRAME = "#c0caf5", "#a9b1d6", "#8089b3", "#3b4261"  # DIM: 5:1 on Tokyo Night's background, readable for times and secondary text
 HEAD, KEY, GOLD, LIVE, HEART = "#bb9af7", "#e0af68", "#f7d774", "#9ece6a", "#f7768e"
 
-def parse(s):  # -> [(text, fg, bg, bold, link)]; {/} resets the colours but not the link
-    segs, fg, bg, bold, ln, pos = [], None, None, False, None, 0
+def parse(s):  # -> [(text, fg, bg, bold, link, reverse)]; {/} resets the colours but not the link
+    segs, fg, bg, bold, ln, rev, pos = [], None, None, False, None, False, 0
     for m in TAG.finditer(s):
-        if m.start() > pos: segs.append((s[pos:m.start()], fg, bg, bold, ln))
+        if m.start() > pos: segs.append((s[pos:m.start()], fg, bg, bold, ln, rev))
         if m.group(1) == "#": fg = "#" + m.group(2)
         elif m.group(1) == "@": bg = "#" + m.group(2)
         elif m.group(3): bold = True
-        elif m.group(4): fg = bg = None; bold = False
+        elif m.group(4): fg = bg = None; bold = rev = False
+        elif m.group(6): rev = True
         else: ln = m.group(5)
         pos = m.end()
-    if pos < len(s): segs.append((s[pos:], fg, bg, bold, ln))
+    if pos < len(s): segs.append((s[pos:], fg, bg, bold, ln, rev))
     return segs
 
 def width(t): return len(t) if t.isascii() else sum(1 + (unicodedata.east_asian_width(ch) in "WF") for ch in t)  # ⚓ takes two columns
@@ -54,11 +55,11 @@ def rgb(h): return ";".join(str(int(h[i:i+2], 16)) for i in (1, 3, 5))
 
 @functools.lru_cache(maxsize=4096)
 def to_ansi(s):
-    out, cur, ln = [], (None, None, False), None
-    for t, fg, bg, bold, url in parse(s):
-        st = (fg, bg, bold)
+    out, cur, ln = [], (None, None, False, False), None
+    for t, fg, bg, bold, url, rev in parse(s):
+        st = (fg, bg, bold, rev)
         if st != cur:
-            codes = ["0"] + (["1"] if bold else []) + ([f"38;2;{rgb(fg)}"] if fg else []) + ([f"48;2;{rgb(bg)}"] if bg else [])
+            codes = ["0"] + (["1"] if bold else []) + (["7"] if rev else []) + ([f"38;2;{rgb(fg)}"] if fg else []) + ([f"48;2;{rgb(bg)}"] if bg else [])
             out.append(f"\x1b[{';'.join(codes)}m"); cur = st
         if url != ln: out.append(f"\x1b]8;;{url or ''}\x1b\\"); ln = url  # OSC 8: a terminal hyperlink, zero columns wide
         out.append(t)
@@ -172,7 +173,7 @@ def creature(mood, acc=None, colour=0, f=0):  # f: animation frame 0/1; frame 0 
 
 def mood_pal(pal, col, t): return {**pal, **{k: mix(pal[k], col, t) for k in TINT if k in pal}}
 
-def render_px(g, pal, w=12):
+def render_px(g, pal, w=12):  # every split cell is a ▀, so all the halves in a line meet at one height: Ghostty draws ▀ and ▄ each round(h/2) tall, which overlap by a pixel in an odd-height cell
     out = []
     for r in range(0, len(g), 2):
         line = ""
@@ -180,7 +181,7 @@ def render_px(g, pal, w=12):
             tf, bf = pal.get(g[r][col]), pal.get(g[r + 1][col])
             if not tf and not bf: line += " "
             elif tf and not bf: line += f"{{#{tf[1:]}}}▀{{/}}"
-            elif bf and not tf: line += f"{{#{bf[1:]}}}▄{{/}}"
+            elif bf and not tf: line += f"{{#{bf[1:]}}}{{v}}▀{{/}}"  # reversed: the top half in the terminal's own background
             elif tf == bf: line += f"{{#{tf[1:]}}}█{{/}}"
             else: line += f"{{#{tf[1:]}}}{{@{bf[1:]}}}▀{{/}}"
         out.append(line)
@@ -631,8 +632,7 @@ def creatures(shown, trophies, width=W, tick=None, view=None, decs=(), week=Fals
     if not shown: body = [""] * 5 + [center(c(DIM, "no workers aboard · Mochi waits for the next task"), room)] + [""] * 5
     else:
         cells = [cell(i, x, tick) for i, x in enumerate(shown, 1)]
-        lead = " " * max(2, (room - cols * CW) // 2)  # the grid sits centred in the room beside the trophy column
-        body = [lead + "".join(col[i] for col in cells[k:k + cols]) for k in range(0, len(cells), cols) for i in range(CH)]
+        body = ["  " + "".join(col[i] for col in cells[k:k + cols]) for k in range(0, len(cells), cols) for i in range(CH)]
     return [padr(l, room) + t for l, t in zip(body, trophy_col(trophies, len(body), week))]
 
 def hint(key, label, view, cur): return c(KEY, key) + c(DIM, " back" if view == cur else " " + label)  # the key's footer hint: "back" while its view is open

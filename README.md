@@ -48,7 +48,7 @@ A tiled strip on top of the Firstmate tab is the closest fit.
 `aboard` counts the workers (not the main session), `needs you` counts what waits on you (see `d`), and `landed today` counts today's merges, whichever span the trophies show. A part that would say 0 is left out, except `aboard`.
 On the right of the title bar: `+N more` when more workers than fit, and `● live 3s`.
 
-**Layout:** the frame fills the pane's width (at least 80 columns). Up to eight Mochis, as many across as fit beside the trophy column (two at 80 columns, six at 156, eight at 180), wrapping to more rows, the grid centred in the space beside the column.
+**Layout:** the frame fills the pane's width (at least 80 columns). Up to eight Mochis, as many across as fit beside the trophy column (two at 80 columns, six at 156, eight at 180), wrapping to more rows, the grid two columns in from the left border on every width (on a wide pane the space between the Mochis and the trophy column stays empty).
 Any more workers show as `+N more` in the title.
 Each Mochi has a two-line label: `N project` (`1 main` for the main session), then the task or session name.
 Each line is cut to the column width on its own and centred under the sprite.
@@ -154,7 +154,8 @@ It has no hearts (the line reads `main session`), no accessory rotation (always 
 
 **Hunger:** five solid hearts (●, hollow ○ when lost), then `fed` or `waiting 25m` (just `4d 13h` when the word would not fit the cell). They drain by one every 10 minutes, and only while the worker is calling (waiting on you). A new handled inbox message fills them again. That covers your prompts and Firstmate's, including while you are away. A worker that stops calling is also full again. Nothing else drains hunger.
 
-**Look:** every worker is the Mochi from the approved design, in every layout. The test suite checks each mood, colour and accessory against it.
+**Look:** every worker is the Mochi from the approved design, in every layout. The test suite checks each mood, colour and accessory against it, pixel by pixel.
+Each sprite pixel is half a cell. Every cell split between two colours, or between a colour and the background, is drawn as an upper half block `▀` (in reverse video when only its lower half is coloured), so every split in a line falls at the same height. Ghostty draws `▀` and `▄` each `round(height / 2)` tall, so in an odd-height cell (8×17 at 1x with its built-in font) mixing them would put one-pixel steps in the sprite's edges.
 The frame has rounded corners. Every view shares one palette (Tokyo Night): headings, the title's `needs you` and the calling tag in violet; key letters, label numbers, times and dates in amber; cups and their counts in gold; names in light text, task names a shade quieter, moods and card actions in their mood colours, everything else in a dim that still reads at 5:1 on the dark background, lines in the frame colour.
 
 **Colours and accessories:** the main session is blue, a ninth colour no project gets, with an orange collar so it shows. Each project gets one of eight colours from a stable hash of its name. Workers in the same project share the colour.
