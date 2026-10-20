@@ -123,7 +123,7 @@ Every key sits under the left hand, except `Enter` to end a typed answer. The ol
 
 Press `d`, pick a card with `a` / `s`, then answer it:
 
-1. When the card's text lists options, the picked card shows them numbered (`1 (a) accept the PR with no CI`). Options are read from the free text in three forms: lettered or numbered marks in order (`(a) … (b) …`, `a) … b) …`, `(1) … (2) …`), `Options: A …; B …`, or a closing question `X, Y, or Z?`. A repeated mark later in the text (`Recommend (a)`) is not an option. A card whose text lists none shows no numbers.
+1. When the card's text lists options, the picked card shows them numbered (`1 (a) accept the PR with no CI`). Options are read from the free text in three forms: lettered or numbered marks in order (`(a) … (b) …`, `a) … b) …`, `(1) … (2) …`), `Options: A …; B …`, or a closing question `X, Y, or Z?`, each part kept as written (`Should I squash the commits or keep them?` gives `1 Should I squash the commits` and `2 keep them`). A repeated mark later in the text (`Recommend (a)`) is not an option. A card whose text lists none shows no numbers.
 2. Press the option's number, or `e` to type any answer and `Enter` to end it. Any card can be answered this way: `decide`, `unblock` or `review`.
 3. The card shows the exact answer, `send › <answer>`, with `f send to Firstmate · Esc cancel`. Nothing is sent until you press `f`. `Esc` drops the answer.
 4. After `f` the card shows a receipt: `✓ sent to Firstmate (note <id>) · <answer>`, `✓ already sent …` for a repeat, or `✗` and what went wrong. A failed send is never retried; send it again yourself.

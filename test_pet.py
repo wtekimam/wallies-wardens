@@ -178,7 +178,9 @@ class Answers(unittest.TestCase):  # answering a needs-you card: subprocess.run 
         self.assertEqual(pet.options("pick (1) fast (2) safe"), ["(1) fast", "(2) safe"])
         self.assertEqual(pet.options("Options: A (recommended) drop the secret, keep /code; B stop blocked. Details: /x/y.md"),
                          ["A (recommended) drop the secret, keep /code", "B stop blocked"])
-        self.assertEqual(pet.options("tests pass. Should I use red, green, or blue?"), ["red", "green", "blue"])
+        self.assertEqual(pet.options("tests pass. Should I use red, green, or blue?"), ["Should I use red", "green", "blue"])
+        self.assertEqual(pet.options("Should I squash the commits or keep them?"), ["Should I squash the commits", "keep them"])
+        self.assertEqual(pet.options("Should I merge now or wait?"), ["Should I merge now", "wait"])
         self.assertEqual(pet.options("keep Chatter separate or merge it into mapa?"), ["keep Chatter separate", "merge it into mapa"])
         for none in ("which colour for the bikeshed", "A or B", "found X; blocked on Y", "see (a) only", "", None, "is it ready?"):
             self.assertEqual(pet.options(none), [], none)
@@ -284,6 +286,15 @@ class Answers(unittest.TestCase):  # answering a needs-you card: subprocess.run 
         a.key("\x1b", ws)
         self.assertFalse(a.key("t", ws))  # back out: the view's own keys run
         self.assertFalse(a.key("e", []))  # nothing to answer
+
+    def test_picked_card_keeps_its_keys_beside_another_card(self):  # two cards in the strip (11 rows): a long answer still leaves the picked card and its keys on screen
+        ws = [self.card(), self.card("demo-b", f"blocked [at={NOW}]: CI red")]
+        a = pet.Answer(lambda *_: (True, ""))
+        body = lambda: "\n".join(pet.TAG.sub("", l) for l in pet.draw(ws, [], pet.STRIP_ROWS, view="d", ans=a))
+        for k in "e" + "ship it after the flaky suite is rerun once more " * 12: a.key(k, ws)
+        self.assertIn("Enter done · Esc cancel", body())
+        a.key("\r", ws)
+        for s in ("▸● decide", "send › ship it", "f send to Firstmate · Esc cancel", "+1 more"): self.assertIn(s, body())
 
     def test_keys_split_escape_sequences(self):
         self.assertEqual(pet.KEYS.findall("\x1b[A\x1bOBa\x1b"), ["\x1b[A", "\x1bOB", "a", "\x1b"])

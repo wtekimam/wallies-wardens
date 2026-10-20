@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Wallie's Wardens: one Mochi per Firstmate worker, plus one (blue, first) for the main Firstmate session, in a Herdr pane (a strip on top of the Firstmate tab, or a popup).
 
-Read-only view of a Firstmate home. The main session's mood is the agent_status of the Herdr pane whose cwd is the home
+A view of a Firstmate home; its one write, an answered card, is described below. The main session's mood is the agent_status of the Herdr pane whose cwd is the home
 (`herdr pane list`, once per poll). Per worker it reads only state/<id>.meta, the tail of
 state/<id>.status, the mtime of state/<id>.turn-ended and the mtime of state/<id>.inbox/handled/.
 What needs the captain (a worker's newest unresolved needs-decision or blocked line, or a done line waiting on review) is shown from the same status tail;
@@ -604,7 +604,7 @@ def decision_room(decs, h, w, ans=None):  # -> h lines of w columns: the creatur
     lines = [" " + c(HEAD, "needs you", True) + c(DIM, f" · {len(decs)}" if decs else " · none")]
     sel = ans.pick(decs) if ans else -1
     cards = [decision_card(d, w) for d in decs]
-    if ans: cards = [ans.card(d, card, i == sel, w, h - 1, len(decs) > 1) for i, (d, card) in enumerate(zip(decs, cards))]
+    if ans: cards = [ans.card(d, card, i == sel, w, h - 1 - (len(decs) > 1), len(decs) > 1) for i, (d, card) in enumerate(zip(decs, cards))]
     start, need = 0, lambda a, b: 1 + sum(len(x) for x in cards[a:b + 1]) + (len(decs) > 1)
     while start < sel and need(start, sel) > h: start += 1  # the picked card always shows: the ones before it give way
     shown = 0
@@ -640,8 +640,6 @@ def options(text):  # -> the options a card's text lists, in order: "(a) ... (b)
     if not re.search(r"\sor\s", clause): return []
     parts = [p.strip() for p in re.split(r",\s*(?:or\s+)?|\s+or\s+", clause)]
     if len(parts) < 2 or not all(parts) or any(len(p) > 60 for p in parts): return []
-    head, rest = parts[0].split(), max(len(p.split()) for p in parts[1:])
-    if len(head) - rest >= 2: parts[0] = " ".join(head[-rest:])  # "should I use red, green, or blue" -> red, green, blue
     return parts
 
 WHAT = {"needs-decision": "decision", "blocked": "blocker", "review": "review request"}
