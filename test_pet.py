@@ -1,5 +1,6 @@
 """python3 -m unittest test_pet  -- fixture Firstmate-style state dirs, no live home touched."""
 import datetime, json, os, re, subprocess, sys, tempfile, time, unittest, zlib
+from unittest import mock
 import pet
 
 NOW = 1790000000
@@ -159,6 +160,134 @@ class Decisions(unittest.TestCase):
         self.h.worker("demo-cli", lines=[f"needs-decision [at={int(time.time())}]: pick one"], active=time.time())
         out = subprocess.run([sys.executable, pet.__file__, "--once"], env={**os.environ, "FM_HOME": self.h.root}, capture_output=True, text=True, check=True).stdout
         self.assertIn("pick one", re.sub(r"\x1b\[[0-9;]*m", "", out))
+
+class Answers(unittest.TestCase):  # answering a needs-you card: subprocess.run is mocked or a stand-in script in a temp home; no real inbox is ever written
+    def setUp(self): self.h = Home()
+    def tearDown(self): self.h.tmp.cleanup()
+
+    OPTS = "PR https://x/pull/21 open, CI never reports. Options: (a) accept the PR with no CI, (b) add no_ci: true on master; (c) keep waiting until merge. Recommend (a) or (b)."
+
+    def card(self, wid="demo-ci", line=None, **kw):
+        return self.h.read(self.h.worker(wid, lines=[line or f"needs-decision [key=nm-1-ci] [at={NOW - 60}]: {self.OPTS}"], **kw))
+
+    def ok(self, out='{"outcome":"created","id":"n-7","saved":true}', code=0, err=""):
+        return mock.patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], code, out + "\n", err))
+
+    def test_options_from_the_text(self):
+        self.assertEqual(pet.options(self.OPTS), ["(a) accept the PR with no CI", "(b) add no_ci: true on master", "(c) keep waiting until merge"])
+        self.assertEqual(pet.options("pick (1) fast (2) safe"), ["(1) fast", "(2) safe"])
+        self.assertEqual(pet.options("Options: A (recommended) drop the secret, keep /code; B stop blocked. Details: /x/y.md"),
+                         ["A (recommended) drop the secret, keep /code", "B stop blocked"])
+        self.assertEqual(pet.options("tests pass. Should I use red, green, or blue?"), ["red", "green", "blue"])
+        self.assertEqual(pet.options("keep Chatter separate or merge it into mapa?"), ["keep Chatter separate", "merge it into mapa"])
+        for none in ("which colour for the bikeshed", "A or B", "found X; blocked on Y", "see (a) only", "", None, "is it ready?"):
+            self.assertEqual(pet.options(none), [], none)
+
+    def test_note_stands_alone(self):
+        os.makedirs(os.path.join(self.h.root, "data"))
+        with open(os.path.join(self.h.root, "data", "backlog.md"), "w") as f: f.write("- [ ] demo-ci - demo: wire the CI (repo: d)\n")
+        x = self.card()
+        self.assertEqual(x["decision"]["key"], "nm-1-ci")
+        note = pet.answer_note(x, "(b) add no_ci: true on master")
+        self.assertTrue(note.startswith("Captain's answer to demo task demo-ci: (b) add no_ci: true on master\n"))  # fm-inbox's summary is the first 100 characters
+        for s in ("Task: wire the CI", "the decision [key=nm-1-ci] raised ", "https://x/pull/21", self.OPTS, "Wardens"): self.assertIn(s, note)
+        blocked = pet.answer_note(self.card("demo-b", f"blocked [at={NOW}]: CI red"), "rerun it")
+        self.assertIn("It answers the blocker raised", blocked)
+        self.assertNotIn("Task:", blocked)
+
+    def test_request_id_is_stable_per_task_decision_and_answer(self):
+        x, rid = self.card(), pet.request_id(self.card(), "yes")
+        self.assertEqual(pet.request_id(x, "yes"), rid)
+        self.assertEqual(pet.request_id(dict(x, decision=dict(x["decision"], at=NOW + 99, waiting="9h")), "yes"), rid)  # the wait moves on; the id does not
+        self.assertRegex(rid, r"^wardens-[0-9a-f]{32}$")  # fm-inbox.sh's request-id alphabet, well under 128
+        others = {pet.request_id(x, "no"), pet.request_id(self.card("demo-other"), "yes"),
+                  pet.request_id(self.card(line=f"needs-decision [key=nm-1-ci] [at={NOW - 60}]: another question"), "yes"),
+                  pet.request_id(self.card(line=f"needs-decision [key=nm-1-ci] [at={NOW - 5}]: {self.OPTS}"), "yes")}
+        self.assertNotIn(rid, others)
+        self.assertEqual(len(others), 4)
+
+    def test_nothing_is_sent_without_f(self):
+        x = self.card()
+        a = pet.Answer(lambda text, rid: pet.send_note(self.h.root, text, rid))
+        with self.ok() as run:
+            for keys in ("2", "1qtdcwr\r\n\x7fs", "\x1b", "e", "maybe\r", "\x1b", "e\r\r", "\x1b"):  # pick, wander, cancel; type, Enter, cancel; an empty answer
+                for k in keys: a.key(k, [x])
+            self.assertIsNone(a.mode)
+            run.assert_not_called()
+            for k in "1f": a.key(k, [x])
+            run.assert_called_once()
+            cmd, kw = run.call_args
+            self.assertEqual(cmd[0], [os.path.join(self.h.root, "bin", "fm-inbox.sh"), "note", "--request-id", pet.request_id(x, "(a) accept the PR with no CI"),
+                                      "--json", "--", pet.answer_note(x, "(a) accept the PR with no CI")])
+            self.assertEqual(kw["env"]["FM_HOME"], self.h.root)
+            a.key("f", [x])  # f again with nothing waiting: nothing
+            run.assert_called_once()
+            for k in "e  ship  it \rf": a.key(k, [x])
+            self.assertEqual(run.call_count, 2)
+            self.assertTrue(run.call_args[0][0][-1].startswith("Captain's answer to demo task demo-ci: ship it\n"))
+
+    def test_receipt_on_the_card_and_failures_shown(self):
+        x = self.card()
+        a = pet.Answer(lambda text, rid: pet.send_note(self.h.root, text, rid))
+        body = lambda: "\n".join(pet.TAG.sub("", l) for l in pet.decision_room([x], 11, 78, a))
+        for k in "1": a.key(k, [x])
+        self.assertIn("send › (a) accept the PR with no CI", body())
+        self.assertIn("f send to Firstmate · Esc cancel", body())
+        with self.ok(): a.key("f", [x])
+        self.assertIn("✓ sent to Firstmate (note n-7) · (a) accept the PR with no CI", body())
+        with self.ok('{"outcome":"replay","id":"n-7","saved":true}'): a.key("1", [x]); a.key("f", [x])
+        self.assertIn("✓ already sent to Firstmate (note n-7)", body())
+        with self.ok("", 1, "fm-inbox: request id reserved but unreadable") as run: a.key("1", [x]); a.key("f", [x])
+        self.assertIn("✗ not sent: fm-inbox: request id reserved but unreadable", body())
+        run.assert_called_once()  # a failure is shown, never retried
+        with self.ok('{"outcome":"created","id":"n-8","saved":true,"announced":false}', 3, "firstmate was NOT woken"): a.key("1", [x]); a.key("f", [x])
+        self.assertIn("✗ saved as note n-8 but Firstmate was not woken", body())
+        with mock.patch.object(subprocess, "run", side_effect=FileNotFoundError("no fm-inbox.sh")): a.key("1", [x]); a.key("f", [x])
+        self.assertIn("✗ not sent: no fm-inbox.sh", body())
+
+    def test_a_closed_decision_is_not_answered(self):
+        x = self.card()
+        a = pet.Answer(lambda text, rid: pet.send_note(self.h.root, text, rid))
+        with self.ok() as run:
+            a.key("1", [x]); a.key("f", [])
+            run.assert_not_called()
+        self.assertIn("not sent: it closed before f", a.receipts[pet.ident(x)][1])
+
+    def test_stand_in_script_gets_the_note(self):  # a fake bin/fm-inbox.sh in the temp home: the real call shape, still no real inbox
+        os.makedirs(os.path.join(self.h.root, "bin"))
+        script, got = os.path.join(self.h.root, "bin", "fm-inbox.sh"), os.path.join(self.h.root, "argv.json")
+        with open(script, "w") as f:
+            f.write(f"#!{sys.executable}\nimport json, os, sys\njson.dump([sys.argv[1:], os.environ['FM_HOME']], open({got!r}, 'w'))\n"
+                    "print(json.dumps(dict(outcome='created', id='n-1', saved=True)))\n")
+        os.chmod(script, 0o755)
+        self.assertEqual(pet.send_note(self.h.root, "hello\nthere", "wardens-abc"), (True, "sent to Firstmate (note n-1)"))
+        with open(got) as f: self.assertEqual(json.load(f), [["note", "--request-id", "wardens-abc", "--json", "--", "hello\nthere"], self.h.root])
+
+    def test_picked_card_shows_its_options_and_keys(self):
+        ws = [self.card(), self.card("demo-b", f"blocked [at={NOW}]: CI red")]
+        a = pet.Answer(lambda *_: (True, ""))
+        strip = [pet.TAG.sub("", l) for l in pet.draw(ws, [], pet.STRIP_ROWS, view="d", ans=a)]
+        self.assertEqual(len(strip), pet.STRIP_ROWS)
+        self.assertTrue(all(pet.vis(l) == pet.W for l in strip))
+        body = "\n".join(strip)
+        for s in ("▸● decide", "1 (a) accept the PR with no CI", "3 (c) keep waiting until merge", "1-3 pick · e type an answer · a s other cards"): self.assertIn(s, body)
+        self.assertNotIn("▸", "\n".join(pet.TAG.sub("", l) for l in pet.draw(ws, [], pet.STRIP_ROWS, view="d")))  # --once and the other views: no picking
+        a.key("s", ws)
+        body = "\n".join(pet.TAG.sub("", l) for l in pet.draw(ws, [], pet.STRIP_ROWS, view="d", ans=a))
+        self.assertIn("▸● unblock", body)
+        self.assertIn("e type an answer · a s other cards", body)
+        self.assertNotIn("pick ·", body)  # "CI red" lists no options
+        a.key("e", ws)
+        for k in "rerun": a.key(k, ws)
+        self.assertIn("answer › rerun", "\n".join(pet.TAG.sub("", l) for l in pet.draw(ws, [], pet.STRIP_ROWS, view="d", ans=a)))
+        self.assertTrue(a.key("t", ws))  # typing: t is a letter of the answer
+        a.key("\x1b", ws)
+        self.assertFalse(a.key("t", ws))  # back out: the view's own keys run
+        self.assertFalse(a.key("e", []))  # nothing to answer
+
+    def test_keys_split_escape_sequences(self):
+        self.assertEqual(pet.KEYS.findall("\x1b[A\x1bOBa\x1b"), ["\x1b[A", "\x1bOB", "a", "\x1b"])
+        self.assertEqual(pet.KEYS.findall("ok é"), list("ok é"))
 
 class Title(unittest.TestCase):
     def setUp(self): self.h = Home()
