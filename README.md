@@ -6,7 +6,8 @@ Each Mochi shows its worker's mood with a small idle animation, gets hungry whil
 and leaves a gold cup in a trophy column at the right edge for every project Firstmate records a merge for.
 A captain's log keeps a short entry for each day the fleet worked, and every PR it shows is a link you can Ctrl-click.
 
-Plain python3 (stdlib only) with no dependencies. It makes no network calls and writes nothing.
+Plain python3 (stdlib only) with no dependencies. It makes no network calls.
+It writes one thing only: an answer you send from the needs-you view (`d`), which goes to Firstmate as a note in your inbox (see Answering). Nothing else is written.
 
 ## Install
 
@@ -68,7 +69,8 @@ The hint reads `d needs you (N)` in the heading colour while N > 0, and plain di
 2. what to do: for `decide` and `unblock`, the status line's text; for `review`, `review & merge PR #<n>` (or `read the report` for a scout) and what is left of the `done` line, such as `checks green`. A PR URL in the text reads as `PR #<n>`.
 3. `waiting 4d 13h`, then the PR (`pr=` in the meta file) when line 2 doesn't already show it, the report (`data/<id>/report.md`, when it exists) and `on hold to <date>` (the backlog's `hold-until`) when there are any.
 
-Every PR shows once, as a short `PR #<n>` link to its URL. No scrolling: what doesn't fit ends in `+N more`, and an empty list says `none`. `d` again returns to the Mochis. Wardens only shows these; answer them in chat with Firstmate.
+Every PR shows once, as a short `PR #<n>` link to its URL. No scrolling: what doesn't fit ends in `+N more`, and an empty list says `none`. `d` again returns to the Mochis.
+One card is picked (`▸`), and you can answer it here instead of in chat with Firstmate (see Answering). The picked card always shows; cards before it make room.
 A Mochi that is calling about a decision also gets a short tag on its second label line: `task · <decision text>`, cut to fit.
 Press `c` for the captain's log: it swaps the Mochis for one entry per day the ledger has records for, newest day first, wrapped to the pane width (see Rules). When the entries don't fit, `a` and `s` page through them. `c` again returns to the Mochis.
 The footer, under a rule that joins the frame, shows `t trophies`, `d needs you (N)`, `c log`, `w today` (`w week` once toggled) (`back` for the open view), `r redraw` and `q close`.
@@ -103,7 +105,33 @@ With eight animated Mochis the pane used about 0.4% of one CPU core, measured ov
 | `q` | close |
 | `Esc` | close the popup (the strip ignores it, so arrow keys don't close it) |
 
-Every key sits under the left hand. The old `l` (log) and `n` / `p` (pages) still work but are not shown.
+In the needs-you view (`d`):
+
+| key | action |
+|---|---|
+| `a` / `s` | pick the previous / next card |
+| `1`–`9` | answer with that option, when the card's text lists options |
+| `e` | type an answer; `Enter` ends it, Backspace deletes, Ctrl-U clears |
+| `f` | send the answer shown on the card |
+| `Esc` | cancel the answer (it closes nothing while an answer is open) |
+
+While you type an answer, or while one waits for `f`, every key belongs to it: `q`, `t`, `d` and the rest are letters of the answer or wait, and only `Esc` (or Ctrl-C, which closes the pane) gets out.
+
+Every key sits under the left hand, except `Enter` to end a typed answer. The old `l` (log) and `n` / `p` (pages and, in `d`, cards) still work but are not shown.
+
+## Answering
+
+Press `d`, pick a card with `a` / `s`, then answer it:
+
+1. When the card's text lists options, the picked card shows them numbered (`1 (a) accept the PR with no CI`). Options are read from the free text in three forms: lettered or numbered marks in order (`(a) … (b) …`, `a) … b) …`, `(1) … (2) …`), `Options: A …; B …`, or a closing question `X, Y, or Z?`, each part kept as written (`Should I squash the commits or keep them?` gives `1 Should I squash the commits` and `2 keep them`). A repeated mark later in the text (`Recommend (a)`) is not an option. A card whose text lists none shows no numbers.
+2. Press the option's number, or `e` to type any answer and `Enter` to end it. Any card can be answered this way: `decide`, `unblock` or `review`.
+3. The card shows the exact answer, `send › <answer>`, with `f send to Firstmate · Esc cancel`. Nothing is sent until you press `f`. `Esc` drops the answer.
+4. After `f` the card shows a receipt: `✓ sent to Firstmate (note <id>) · <answer>`, `✓ already sent …` for a repeat, or `✗` and what went wrong. A failed send is never retried; send it again yourself.
+   A decision that closes while its answer waits for `f` is not answered: its answer is dropped and `✗ not sent: it closed before f` shows under the `needs you` heading.
+
+`f` runs the Firstmate home's own `bin/fm-inbox.sh note --request-id <id> --json -- <text>` (with `FM_HOME` set to that home), the same path as a note you write to Firstmate, so Firstmate reads it at its next check and decides what to do. Nothing happens on its own.
+The note stands alone: it names the project and task, the task's backlog title, which decision it answers (its `[key=…]` and when it was raised) with the decision's full text, and your answer, in its first line so Firstmate's summary of the note shows it.
+The request id is `wardens-` and a hash of the task, the decision (its key, its `at=` and its text) and the answer, so pressing `f` again on the same answer replays the first note instead of sending a second. A different answer, or the same question raised again later, is a new note.
 
 ## What it reads
 
@@ -120,7 +148,7 @@ Every 3 seconds, for each `state/<id>.meta` in the Firstmate home, it reads:
 
 For the main session it reads the `agent_status` of the Herdr pane whose cwd is the Firstmate home, from `herdr pane list` (once every 3 seconds, the same poll).
 
-It never runs `bin/fm-*`, never reads pane contents, and never writes under the Firstmate home.
+It never reads pane contents and never writes under the Firstmate home itself. The one Firstmate script it runs is `bin/fm-inbox.sh note`, only when you press `f` on an answer (see Answering); that script saves the note in the home's inbox. It runs no other `bin/fm-*`.
 Only `--pin`, the pinned strip and the poll's `pane list` call Herdr.
 `--pin` calls `pane list`, `workspace list`, `pane process-info`, `plugin pane open`, `pane swap`, and `pane close` for a restored shell.
 To put focus back it calls `workspace focus`, `tab focus`, `pane neighbor` or `pane focus`.

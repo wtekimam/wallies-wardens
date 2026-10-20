@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Wallie's Wardens: one Mochi per Firstmate worker, plus one (blue, first) for the main Firstmate session, in a Herdr pane (a strip on top of the Firstmate tab, or a popup).
 
-Read-only view of a Firstmate home. The main session's mood is the agent_status of the Herdr pane whose cwd is the home
+A view of a Firstmate home; its one write, an answered card, is described below. The main session's mood is the agent_status of the Herdr pane whose cwd is the home
 (`herdr pane list`, once per poll). Per worker it reads only state/<id>.meta, the tail of
 state/<id>.status, the mtime of state/<id>.turn-ended and the mtime of state/<id>.inbox/handled/.
 What needs the captain (a worker's newest unresolved needs-decision or blocked line, or a done line waiting on review) is shown from the same status tail;
 its title and hold come from data/backlog.md, its report is data/<id>/report.md when that exists, its PR the meta file's pr=.
 Trophies and the captain's log (one entry a day, from templates) come from state/fleet-ledger.jsonl (read by byte offset, only new lines each poll).
 Every PR shown is an OSC 8 hyperlink to its URL; Herdr opens it on Ctrl-click.
-It never writes under the Firstmate home and never runs Firstmate scripts.
+It never writes under the Firstmate home itself. Its one write: in the needs-you view the captain can answer a card, and after a confirming key
+that answer goes to the captain's inbox through the home's own `bin/fm-inbox.sh note`, the same path as a note to Firstmate; no other Firstmate script runs.
 
   python3 pet.py            live pane: read status every 3s, animate about twice a second, redraw only changed lines
   python3 pet.py --once     print one frame to stdout and exit (--once --strip: the strip's frame)
@@ -16,7 +17,7 @@ It never writes under the Firstmate home and never runs Firstmate scripts.
 
 PET_ANIMATE=0 (environment, or a line in the plugin config file) keeps the Mochis still.
 """
-import datetime, functools, json, math, os, re, sys, time, unicodedata, zlib
+import datetime, functools, hashlib, json, math, os, re, sys, time, unicodedata, zlib
 
 POLL = 3                 # seconds between polls
 ASLEEP_SECS = 30 * 60    # no status or turn activity this long (and not calling) -> asleep
@@ -192,6 +193,7 @@ CUP = render_px([list(r) for r in ["YYYY", ".YY.", ".yy.", "yyyy"]], PROPS, 4)
 # ---- reading one worker (read-only, cheap) ----
 EVENT = re.compile(r"^(working|needs-decision|blocked|done|failed|paused|resolved|captain-held|note)\b((?:\s*\[[^\]]*\])*)\s*:\s?(.*)")
 AT = re.compile(r"\bat=(\d+)")
+KEYED = re.compile(r"\bkey=([^\]\s]+)")
 VALIDATING = re.compile(r"no-mistakes|validat", re.I)
 MERGED = re.compile(r"\b(merged|landed)\b", re.I)
 
@@ -217,8 +219,8 @@ def tail(path, n=8192):
         return []
 
 def status_state(lines):
-    """-> (state, text, at). resolved/captain-held close an open decision or blocker."""
-    state, text, at = None, "", 0
+    """-> (state, text, at, key). resolved/captain-held close an open decision or blocker; key is the line's [key=...], or ""."""
+    state, text, at, key = None, "", 0, ""
     for line in lines:
         m = EVENT.match(line)
         if not m: continue
@@ -226,10 +228,11 @@ def status_state(lines):
         stamp = AT.search(tok or "") or AT.search(line)
         if verb == "note": continue
         if verb in ("resolved", "captain-held"):
-            if state in ("needs-decision", "blocked"): state, text = "working", body
+            if state in ("needs-decision", "blocked"): state, text, key = "working", body, ""
             continue
-        state, text, at = verb, body, int(stamp.group(1)) if stamp else at
-    return state, text, at
+        k = KEYED.search(tok or "")
+        state, text, at, key = verb, body, int(stamp.group(1)) if stamp else at, k[1] if k else ""
+    return state, text, at, key
 
 TITLED = re.compile(r"- \[.\] (\S+) - (.+?)(?= \((?:repo|kind|hold|hold-kind|hold-until): | \(since \d|$)")
 HELD = re.compile(r"\(hold-until: ([^)\s]+)\)")
@@ -249,7 +252,7 @@ def backlog(path, stamp):  # -> {task id: (title, hold-until or "", held)} from 
 def read_worker(state_dir, wid, now):
     meta = read_meta(os.path.join(state_dir, wid + ".meta"))
     status_path = os.path.join(state_dir, wid + ".status")
-    st, text, at = status_state(tail(status_path))
+    st, text, at, key = status_state(tail(status_path))
     kind = meta.get("kind", "ship")
     last_active = max(mtime(status_path), mtime(os.path.join(state_dir, wid + ".turn-ended")))
     fed_at = mtime(os.path.join(state_dir, wid + ".inbox", "handled"))  # dir mtime moves when a message is handled
@@ -262,8 +265,8 @@ def read_worker(state_dir, wid, now):
     review = st == "done" and not MERGED.search(text) and (meta.get("pr") or kind == "scout")  # waiting on the captain's review: a decision of its own kind
     if st in ("needs-decision", "blocked") or review:  # an open decision: its newest unresolved line (status_state already applied resolved/captain-held)
         report = os.path.join(os.path.dirname(state_dir), "data", wid, "report.md")
-        dec = dict(kind="review" if review else st, text=text, waiting=age(max(0, now - (at or last_active))), at=at or last_active,
-                   report=report if os.path.exists(report) else "", pr=meta.get("pr", ""), title=title, hold=hold)
+        dec = dict(kind="review" if review else st, text=text, waiting=age(max(0, now - (at or last_active))), at=at or last_active, stamp=at, key=key,
+                   report=report if os.path.exists(report) else "", pr=meta.get("pr", ""), title=title, hold=hold)  # stamp: the line's own at=, 0 without one
     if st in ("blocked", "failed"): mood, sub = "sick", st
     elif st == "needs-decision": mood, bubble = "calling", "your call!"
     elif st == "done" and MERGED.search(text): mood, sub = "party", "merged!"
@@ -597,15 +600,135 @@ def clip_links(parts, n, col):  # parts: [(text, url or "")] -> their text in co
 
 def decisions_of(workers): return sorted((x for x in workers if x.get("decision")), key=lambda x: x["decision"]["at"])  # longest waiting first
 
-def decision_room(decs, h, w):  # -> h lines of w columns: the creatures' place in the needs-you view; one card each, oldest first, "+N more" when they overflow
+def decision_room(decs, h, w, ans=None):  # -> h lines of w columns: the creatures' place in the needs-you view; one card each, oldest first, "+N more" when they overflow; ans: the live pane's answers
+    sel = ans.pick(decs) if ans else -1
     lines = [" " + c(HEAD, "needs you", True) + c(DIM, f" · {len(decs)}" if decs else " · none")]
+    if ans and ans.closed: lines.append("   " + c(HEART, clip("✗ " + ans.closed, w - 5)))  # the dropped answer's card is gone, so its receipt shows here
+    cards = [decision_card(d, w) for d in decs]
+    if ans: cards = [ans.card(d, card, i == sel, w, h - len(lines) - (len(decs) > 1), len(decs) > 1) for i, (d, card) in enumerate(zip(decs, cards))]
+    start, need = 0, lambda a, b: len(lines) + sum(len(x) for x in cards[a:b + 1]) + (len(decs) > 1)
+    while start < sel and need(start, sel) > h: start += 1  # the picked card always shows: the ones before it give way
     shown = 0
-    for i, d in enumerate(decs):
-        card = decision_card(d, w)
-        if len(lines) + len(card) + (i < len(decs) - 1) > h: break  # keep a line for "+N more"
-        lines += card; shown += 1
+    for i in range(start, len(decs)):
+        if len(lines) + len(cards[i]) + (shown + 1 < len(decs)) > h: break  # keep a line for "+N more"
+        lines += cards[i]; shown += 1
     if shown < len(decs): lines.append(" " + c(DIM, f"+{len(decs) - shown} more"))
     return [padr(l, w) for l in lines[:h]] + [" " * w] * (h - len(lines))
+
+# ---- answering a card: the one write Wardens makes, a note in the captain's inbox through the home's own bin/fm-inbox.sh, only after f ----
+LETTERED = re.compile(r"(?<![\w(#/])\(?([a-zA-Z]|[1-9])\)\s")  # (a) / a) / (1) / 1) before an option
+LISTED = re.compile(r"\bOptions?:\s+(?=A\s)", re.I)  # "Options: A ...; B ...": bare capitals, only right after the label
+BARE = re.compile(r"(?:^|(?<=[;,]\s))([A-Z])\s")
+
+def options(text):  # -> the options a card's text lists, in order: "(a) ... (b) ...", "Options: A ...; B ...", or a closing "X, Y, or Z?"; [] when it lists none
+    text = text or ""
+    lst = LISTED.search(text)
+    for marks in ([(m.start(), m.end(), m[1]) for m in LETTERED.finditer(text)],
+                  [(lst.end() + m.start(), lst.end() + m.end(), m[1]) for m in BARE.finditer(text[lst.end():])] if lst else []):
+        for i, (_, _, first) in enumerate(marks):
+            if first not in "aA1": continue
+            run = [marks[i]]
+            for m in marks[i + 1:]:
+                if m[0] >= run[-1][1] and m[2] == chr(ord(run[-1][2]) + 1): run.append(m)  # the next letter or number; anything else (a repeat, "Recommend (a)") is text
+            if len(run) < 2: continue
+            ends = [m[0] for m in run[1:]] + [len(text)]
+            out = [text[s:e] for (s, _, _), e in zip(run, ends)]
+            out[-1] = re.split(r"(?<=[.!?])\s+(?=[A-Z])", out[-1])[0]  # the last runs to the end of its sentence
+            return [re.sub(r"(?:[\s,;]|\bor\b|\band\b)+$", "", re.sub(r"\.$", "", o.strip())) for o in out]
+    q = re.findall(r"([^.?!]*)\?", text)
+    if not q: return []
+    clause = re.split(r"[:;]\s*|\s[-–—]\s", q[-1])[-1].strip()
+    if not re.search(r"\sor\s", clause): return []
+    parts = [p.strip() for p in re.split(r",\s*(?:or\s+)?|\s+or\s+", clause)]
+    if len(parts) < 2 or not all(parts) or any(len(p) > 60 for p in parts): return []
+    return parts
+
+WHAT = {"needs-decision": "decision", "blocked": "blocker", "review": "review request"}
+
+def answer_note(x, answer):  # -> the note's text: it stands alone, naming the project, the task, the decision it answers and the answer
+    d = x["decision"]
+    raised = f" raised {time.strftime('%Y-%m-%d %H:%M', time.localtime(d['stamp']))}" if d.get("stamp") else ""
+    return "\n".join([f"Captain's answer to {x['project']} task {x['id']}: {answer}"] + [f"Task: {d['title']}"] * bool(d.get("title")) +
+                     [f"It answers the {WHAT[d['kind']]}" + (f" [key={d['key']}]" if d.get("key") else "") + f"{raised}: {d['text'] or '(no details)'}",
+                      "Sent from Wardens' needs-you view."])
+
+def request_id(x, answer):  # -> the same id for the same task, decision and answer, so a repeat press replays the note instead of sending a second
+    d = x["decision"]
+    return "wardens-" + hashlib.sha256("\0".join((x["id"], d.get("key", ""), str(d.get("stamp", 0)), d["text"], answer)).encode()).hexdigest()[:32]
+
+def send_note(home, text, rid, run=None):  # -> (sent?, receipt): one `bin/fm-inbox.sh note` in the home; never retried here
+    import subprocess
+    cmd = [os.path.join(home, "bin", "fm-inbox.sh"), "note", "--request-id", rid, "--json", "--", text]
+    try: r = (run or subprocess.run)(cmd, capture_output=True, text=True, timeout=20, env={**os.environ, "FM_HOME": home})
+    except subprocess.TimeoutExpired: return False, "fm-inbox.sh took over 20s, so it may not have saved it; sending it again is safe, a repeat only replays"
+    except (OSError, subprocess.SubprocessError) as e: return False, f"not sent: {e}"
+    try: out = json.loads((r.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError): out = {}
+    out = out if isinstance(out, dict) else {}
+    why = ((r.stderr or "").strip() or (r.stdout or "").strip() or f"exit {r.returncode}").splitlines()[-1]
+    if r.returncode == 0 and out.get("saved"): return True, ("already sent" if out.get("outcome") == "replay" else "sent") + f" to Firstmate (note {out.get('id')})"
+    if r.returncode == 3: return False, f"saved as note {out.get('id')} but Firstmate was not woken: {why}"
+    return False, f"not sent: {why}"
+
+def ident(x): return (x["id"], x["decision"].get("stamp", 0), x["decision"]["text"])  # one decision, across polls
+
+class Answer:
+    """The needs-you view's answers: a / s pick a card, 1-9 one of its options or e a typed answer; it shows the answer, and only f sends it. Esc backs out."""
+    def __init__(self, send):  # send(note text, request id) -> (sent?, receipt)
+        self.send, self.sel, self.mode, self.typed, self.answer, self.target, self.receipts, self.closed = send, 0, None, "", "", None, {}, ""
+
+    def pick(self, decs):  # -> the picked card's index; an answer whose card has closed is dropped, and the heading says so
+        if self.mode and ident(self.target) not in {ident(y) for y in decs}: self.mode, self.closed = None, "not sent: it closed before f"
+        self.sel = min(self.sel, max(0, len(decs) - 1))
+        return self.sel
+
+    def key(self, k, decs):  # -> True when the key was the answer's; the pane's other keys run only when it was not
+        self.pick(decs)
+        if self.mode == "type":
+            if k == "\x1b": self.mode = None
+            elif k in ("\r", "\n"):
+                if self.typed.strip(): self.answer, self.mode = " ".join(self.typed.split()), "confirm"
+            elif k in ("\x7f", "\b"): self.typed = self.typed[:-1]
+            elif k == "\x15": self.typed = ""  # Ctrl-U clears it
+            elif k.isprintable(): self.typed += k
+            return True
+        if self.mode == "confirm":  # only f sends; Esc goes back, every other key waits
+            if k == "\x1b": self.mode = None
+            elif k == "f": self.mode = None; self.deliver()
+            return True
+        if not decs: return False
+        x, k = decs[self.pick(decs)], ALIASES.get(k, k)
+        opts = options(x["decision"]["text"])
+        if k in ("a", "s"): self.sel = min(max(self.sel + (1 if k == "s" else -1), 0), len(decs) - 1)
+        elif k == "e": self.target, self.typed, self.mode, self.closed = x, "", "type", ""
+        elif k.isdigit() and 1 <= int(k) <= len(opts): self.target, self.answer, self.mode, self.closed = x, opts[int(k) - 1], "confirm", ""
+        else: return False
+        return True
+
+    def deliver(self):
+        x = self.target
+        ok, said = self.send(answer_note(x, self.answer), request_id(x, self.answer))
+        self.receipts[ident(x)] = (ok, said + f" · {self.answer}" * ok)
+
+    def card(self, x, lines, picked, w, room, others=False):  # -> the card's lines with its receipt and, when picked, its options and the answer in progress, in at most room lines
+        if picked: lines = [c(KEY, "▸") + lines[0][1:]] + lines[1:]
+        ok, said = self.receipts.get(ident(x), (None, ""))
+        body = [" " * 3 + c(LIVE if ok else HEART, clip(("✓ " if ok else "✗ ") + said, w - 5))] if said else []
+        if self.mode and self.target and ident(self.target) == ident(x):
+            if self.mode == "type":
+                body.append("   " + c(DIM, "answer › ") + c(FG, self.typed[-max(1, w - 17):]) + c(KEY, "▏"))
+                act = c(KEY, "Enter") + c(DIM, " done · ") + c(KEY, "Esc") + c(DIM, " cancel")
+            else:
+                said = wrap([c(DIM, "send ›")] + [c(FG, t) for t in self.answer.split()], w - 5)
+                fit = max(1, room - len(lines) - len(body) - 1)
+                body += ["   " + l for l in said[:fit - 1]] + ["   " + (l if len(said) <= fit else l + c(DIM, " …")) for l in said[fit - 1:fit]]
+                act = c(KEY, "f") + c(DIM, " send to Firstmate · ") + c(KEY, "Esc") + c(DIM, " cancel")
+        elif picked:
+            opts = options(x["decision"]["text"])[:9]
+            body += ["   " + c(KEY, str(i)) + " " + c(FG, clip(o, w - 7)) for i, o in enumerate(opts, 1)]
+            act = (c(KEY, f"1-{len(opts)}") + c(DIM, " pick · ") if opts else "") + c(KEY, "e") + c(DIM, " type an answer") + (c(DIM, " · ") + c(KEY, "a s") + c(DIM, " other cards")) * others
+        else: return lines + body
+        return lines + body[:max(0, room - len(lines) - 1)] + ["   " + act]
 
 def crew(workers, landed):  # -> the title's parts, most important first: who is aboard, how many need the captain, how many landed today (Herdr's pane label already names the pet)
     n, d = sum(not x.get("main") for x in workers), len(decisions_of(workers))
@@ -623,10 +746,10 @@ def panel(workers, rows, w=W, keys=(), landed=0, foot=None, col=None):
         if i < len(xs): xs[i] = ""
     return frame(title(), rows, mk(), w, foot, col)
 
-def creatures(shown, trophies, width=W, tick=None, view=None, decs=(), week=False, page=0, log=()):  # up to eight Mochis, as many across as fit, CH rows each: sprite, two label lines, mood, hearts, bubble; trophies down the right edge
+def creatures(shown, trophies, width=W, tick=None, view=None, decs=(), week=False, page=0, log=(), ans=None):  # up to eight Mochis, as many across as fit, CH rows each: sprite, two label lines, mood, hearts, bubble; trophies down the right edge
     cols, nrows, w = grid(len(shown), width)
     if view == "t": return trophy_room(trophies, CH * nrows, w - 2, week, page)
-    if view == "d": return decision_room(decs, CH * nrows, w - 2)
+    if view == "d": return decision_room(decs, CH * nrows, w - 2, ans)
     if view == "c": return log_room(log, CH * nrows, w - 2, page)
     room = w - 2 - TW
     if not shown: body = [""] * 5 + [center(c(DIM, "no workers aboard · Mochi waits for the next task"), room)] + [""] * 5
@@ -645,10 +768,10 @@ def week_hint(week): return c(KEY, "w") + c(DIM, " today" if week else " week") 
 
 def divider(w, view): return w - 2 - TW if view is None else None  # the trophy column's left edge, which joins the frame's rules; the other views have none
 
-def render(workers, trophies, width=W, tick=None, view=None, week=False, page=0, log=(), landed=0):
+def render(workers, trophies, width=W, tick=None, view=None, week=False, page=0, log=(), landed=0, ans=None):
     shown, w = workers[:SHOWN], grid(len(workers), width)[2]
     col, decs = divider(w, view), decisions_of(workers)
-    rows = [" " * col + c(FRAME, "│") if col is not None else ""] + creatures(shown, trophies, width, tick, view, decs, week, page, log)
+    rows = [" " * col + c(FRAME, "│") if col is not None else ""] + creatures(shown, trophies, width, tick, view, decs, week, page, log, ans)
     foot = (" " + hint("t", "trophies", "t", view) + "  " + dec_hint(view, len(decs)) + "  " + hint("c", "log", "c", view) + "  " + week_hint(week) + "  " +
             c(KEY, "r") + c(DIM, " redraw  ") + c(KEY, "q") + c(DIM, " close"))
     return panel(workers, rows, w, (), landed, foot, col)
@@ -661,17 +784,17 @@ def full_rows(n, width=W): return FULL_ROWS + CH * (grid(n, width)[1] - 1)
 def strip_rows(n, width=W): return STRIP_ROWS + CH * (grid(n, width)[1] - 1)  # a second row of creatures grows the strip
 def layout_for(rows, n=0, width=W): return "full" if rows >= full_rows(n, width) else "strip"
 
-def render_strip(workers, trophies, width=W, tick=None, view=None, week=False, page=0, log=(), landed=0):
+def render_strip(workers, trophies, width=W, tick=None, view=None, week=False, page=0, log=(), landed=0, ans=None):
     shown, w = workers[:SHOWN], grid(len(workers), width)[2]
     decs = decisions_of(workers)
     keys = [c(DIM, " · ") + x for x in (c(KEY, "q") + c(DIM, " close"), hint("t", "trophies", "t", view), dec_hint(view, len(decs)), hint("c", "log", "c", view), week_hint(week))]
     if decs and view != "d": keys.insert(1, keys.pop(2))  # something waits: "d needs you (N)" outlives "t trophies" when the bar is tight
     if view == "c": keys.insert(1, keys.pop(3))  # the open log's "c back" outlives the rest
-    return panel(workers, creatures(shown, trophies, width, tick, view, decs, week, page, log), w, keys, landed, col=divider(w, view))
+    return panel(workers, creatures(shown, trophies, width, tick, view, decs, week, page, log, ans), w, keys, landed, col=divider(w, view))
 
-def draw(workers, trophies, rows, width=W, tick=None, view=None, week=False, page=0, log=(), landed=0):  # -> lines for a terminal this size; never more lines than fit (that would scroll)
+def draw(workers, trophies, rows, width=W, tick=None, view=None, week=False, page=0, log=(), landed=0, ans=None):  # -> lines for a terminal this size; never more lines than fit (that would scroll)
     lay = render if layout_for(rows, len(workers), width) == "full" else render_strip
-    return lay(workers, trophies, width, tick, view, week, page, log, landed)[:max(1, rows)]
+    return lay(workers, trophies, width, tick, view, week, page, log, landed, ans)[:max(1, rows)]
 
 # ---- --pin: the startup hook. Opens the pet as a strip on top of the Firstmate tab, once ----
 TITLE = "Wallie's Wardens"  # the pane label Herdr gives the plugin pane (manifest title)
@@ -755,6 +878,7 @@ def fm_home(): return os.path.expanduser(setting("FM_HOME", DEFAULT_HOME))
 def animate(): return setting("PET_ANIMATE", "1").lower() not in ("0", "off", "no", "false")
 
 ALIASES = dict(l="c", n="s", p="a")  # the old right-hand keys still work, unadvertised: every hint names a left-hand key
+KEYS = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1bO.|.", re.S)  # one read -> its keys; an arrow's whole escape sequence is one key, a lone Esc another
 
 def focus_cmds(w, herdr="herdr"):  # the CLI has no pane focus by id: focus the worker's workspace, then its tab
     return [[herdr, "workspace", "focus", w["ws"]]] * bool(w.get("ws")) + [[herdr, "tab", "focus", w["tab"]]] * bool(w.get("tab"))
@@ -772,6 +896,7 @@ def live(pet):
     strip, anim, herdr = os.environ.get("PET_STRIP") and tiled, animate(), os.environ.get("HERDR_BIN_PATH", "herdr")
     out.write("\x1b[?1049h\x1b[?25l"); out.flush()
     last, workers, tick, next_poll, asked, view, page = None, [], 0, 0, None, None, 0
+    ans = Answer(lambda text, rid: send_note(pet.home, text, rid))  # the needs-you view's answers; they outlive switching views
     try:
         while True:
             now = time.time()
@@ -783,7 +908,7 @@ def live(pet):
                 if want != size.lines:
                     try: fit_strip(functools.partial(herdr_call, herdr), os.environ["HERDR_PANE_ID"], want)
                     except Exception: pass  # ponytail: a failed refit leaves the strip as it is; the next change retries
-            text = [to_ansi(l) for l in draw(workers, pet.trophies, size.lines, size.columns, tick if anim else None, view, pet.week, page, pet.log, pet.landed)]
+            text = [to_ansi(l) for l in draw(workers, pet.trophies, size.lines, size.columns, tick if anim else None, view, pet.week, page, pet.log, pet.landed, ans if view == "d" else None)]
             if last is None or len(text) != len(last):  # first frame or resize: clear and draw it all
                 out.write("\x1b[H\x1b[2J" + "\n".join(text)); out.flush()
             elif text != last:  # otherwise rewrite only the lines that changed (mostly sprite rows while animating)
@@ -793,17 +918,20 @@ def live(pet):
             if not ready: tick += anim
             if wake_r in ready: os.read(wake_r, 64); last = None
             if fd not in ready: continue
-            key = os.read(fd, 1).decode(errors="ignore")
-            key = ALIASES.get(key, key)
-            if key in ("q", "\x03") or key == "\x1b" and not tiled: return  # Esc starts arrow keys too: only the popup takes it
-            if key == "r": last = None
-            if key == "w": pet.week, next_poll = not pet.week, 0  # the next loop polls, so the trophies are recomputed at once
-            if key in ("t", "d", "c", "w"): page = 0  # a new view or span starts on its first page
-            if key in ("t", "d", "c"): view = None if view == key else key  # same height in every view, so the strip never refits
-            if key in ("s", "a") and view in ("t", "c"):  # page through trophies or log entries that do not fit
-                _, nrows, w = grid(len(workers), size.columns)
-                pages = trophy_pages(pet.trophies, CH * nrows, w - 2) if view == "t" else log_pages(pet.log, CH * nrows, w - 2)
-                page = min(max(page + (1 if key == "s" else -1), 0), len(pages) - 1)
+            for key in KEYS.findall(os.read(fd, 1024).decode(errors="ignore")):  # a paste into a typed answer arrives in one read
+                if len(key) > 1: continue  # an arrow or another escape sequence: no key of ours
+                if key == "\x03": return
+                if view == "d" and ans.key(key, decisions_of(workers)): continue  # while an answer is typed or waits for f, every key is the answer's
+                key = ALIASES.get(key, key)
+                if key == "q" or key == "\x1b" and not tiled: return  # Esc starts arrow keys too: only the popup takes it
+                if key == "r": last = None
+                if key == "w": pet.week, next_poll = not pet.week, 0  # the next loop polls, so the trophies are recomputed at once
+                if key in ("t", "d", "c", "w"): page = 0  # a new view or span starts on its first page
+                if key in ("t", "d", "c"): view = None if view == key else key  # same height in every view, so the strip never refits
+                if key in ("s", "a") and view in ("t", "c"):  # page through trophies or log entries that do not fit
+                    _, nrows, w = grid(len(workers), size.columns)
+                    pages = trophy_pages(pet.trophies, CH * nrows, w - 2) if view == "t" else log_pages(pet.log, CH * nrows, w - 2)
+                    page = min(max(page + (1 if key == "s" else -1), 0), len(pages) - 1)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         out.write("\x1b[0m\x1b[?25h\x1b[?1049l"); out.flush()
