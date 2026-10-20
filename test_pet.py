@@ -250,10 +250,21 @@ class Answers(unittest.TestCase):  # answering a needs-you card: subprocess.run 
     def test_a_closed_decision_is_not_answered(self):
         x = self.card()
         a = pet.Answer(lambda text, rid: pet.send_note(self.h.root, text, rid))
+        y = self.card("demo-other")
+        body = lambda decs: "\n".join(pet.TAG.sub("", l) for l in pet.decision_room(decs, 11, 78, a))
         with self.ok() as run:
-            a.key("1", [x]); a.key("f", [])
+            a.key("1", [x, y])
+            self.assertIn("f send to Firstmate · Esc cancel", body([x, y]))
+            shown = body([y])  # x resolves at the next poll, before f
+            self.assertIn("✗ not sent: it closed before f", shown)
+            self.assertNotIn("Esc cancel", shown)
+            self.assertIn("1-3 pick", shown)
+            self.assertFalse(a.key("q", [y]))  # q closes the pane again, as the footer says
+            a.key("f", [y])
             run.assert_not_called()
-        self.assertIn("not sent: it closed before f", a.receipts[pet.ident(x)][1])
+            self.assertTrue(a.key("1", [y]))  # the hinted pick works and starts a new answer
+            self.assertEqual(a.mode, "confirm")
+            self.assertNotIn("closed before f", body([y]))
 
     def test_stand_in_script_gets_the_note(self):  # a fake bin/fm-inbox.sh in the temp home: the real call shape, still no real inbox
         os.makedirs(os.path.join(self.h.root, "bin"))

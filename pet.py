@@ -601,11 +601,12 @@ def clip_links(parts, n, col):  # parts: [(text, url or "")] -> their text in co
 def decisions_of(workers): return sorted((x for x in workers if x.get("decision")), key=lambda x: x["decision"]["at"])  # longest waiting first
 
 def decision_room(decs, h, w, ans=None):  # -> h lines of w columns: the creatures' place in the needs-you view; one card each, oldest first, "+N more" when they overflow; ans: the live pane's answers
-    lines = [" " + c(HEAD, "needs you", True) + c(DIM, f" · {len(decs)}" if decs else " · none")]
     sel = ans.pick(decs) if ans else -1
+    lines = [" " + c(HEAD, "needs you", True) + c(DIM, f" · {len(decs)}" if decs else " · none")]
+    if ans and ans.closed: lines.append("   " + c(HEART, clip("✗ " + ans.closed, w - 5)))  # the dropped answer's card is gone, so its receipt shows here
     cards = [decision_card(d, w) for d in decs]
-    if ans: cards = [ans.card(d, card, i == sel, w, h - 1 - (len(decs) > 1), len(decs) > 1) for i, (d, card) in enumerate(zip(decs, cards))]
-    start, need = 0, lambda a, b: 1 + sum(len(x) for x in cards[a:b + 1]) + (len(decs) > 1)
+    if ans: cards = [ans.card(d, card, i == sel, w, h - len(lines) - (len(decs) > 1), len(decs) > 1) for i, (d, card) in enumerate(zip(decs, cards))]
+    start, need = 0, lambda a, b: len(lines) + sum(len(x) for x in cards[a:b + 1]) + (len(decs) > 1)
     while start < sel and need(start, sel) > h: start += 1  # the picked card always shows: the ones before it give way
     shown = 0
     for i in range(start, len(decs)):
@@ -674,13 +675,15 @@ def ident(x): return (x["id"], x["decision"].get("stamp", 0), x["decision"]["tex
 class Answer:
     """The needs-you view's answers: a / s pick a card, 1-9 one of its options or e a typed answer; it shows the answer, and only f sends it. Esc backs out."""
     def __init__(self, send):  # send(note text, request id) -> (sent?, receipt)
-        self.send, self.sel, self.mode, self.typed, self.answer, self.target, self.receipts = send, 0, None, "", "", None, {}
+        self.send, self.sel, self.mode, self.typed, self.answer, self.target, self.receipts, self.closed = send, 0, None, "", "", None, {}, ""
 
-    def pick(self, decs):  # -> the picked card's index
+    def pick(self, decs):  # -> the picked card's index; an answer whose card has closed is dropped, and the heading says so
+        if self.mode and ident(self.target) not in {ident(y) for y in decs}: self.mode, self.closed = None, "not sent: it closed before f"
         self.sel = min(self.sel, max(0, len(decs) - 1))
         return self.sel
 
     def key(self, k, decs):  # -> True when the key was the answer's; the pane's other keys run only when it was not
+        self.pick(decs)
         if self.mode == "type":
             if k == "\x1b": self.mode = None
             elif k in ("\r", "\n"):
@@ -691,23 +694,21 @@ class Answer:
             return True
         if self.mode == "confirm":  # only f sends; Esc goes back, every other key waits
             if k == "\x1b": self.mode = None
-            elif k == "f": self.mode = None; self.deliver(decs)
+            elif k == "f": self.mode = None; self.deliver()
             return True
         if not decs: return False
         x, k = decs[self.pick(decs)], ALIASES.get(k, k)
         opts = options(x["decision"]["text"])
         if k in ("a", "s"): self.sel = min(max(self.sel + (1 if k == "s" else -1), 0), len(decs) - 1)
-        elif k == "e": self.target, self.typed, self.mode = x, "", "type"
-        elif k.isdigit() and 1 <= int(k) <= len(opts): self.target, self.answer, self.mode = x, opts[int(k) - 1], "confirm"
+        elif k == "e": self.target, self.typed, self.mode, self.closed = x, "", "type", ""
+        elif k.isdigit() and 1 <= int(k) <= len(opts): self.target, self.answer, self.mode, self.closed = x, opts[int(k) - 1], "confirm", ""
         else: return False
         return True
 
-    def deliver(self, decs):
+    def deliver(self):
         x = self.target
-        if ident(x) not in {ident(y) for y in decs}: self.receipts[ident(x)] = (False, "not sent: it closed before f")
-        else:
-            ok, said = self.send(answer_note(x, self.answer), request_id(x, self.answer))
-            self.receipts[ident(x)] = (ok, said + f" · {self.answer}" * ok)
+        ok, said = self.send(answer_note(x, self.answer), request_id(x, self.answer))
+        self.receipts[ident(x)] = (ok, said + f" · {self.answer}" * ok)
 
     def card(self, x, lines, picked, w, room, others=False):  # -> the card's lines with its receipt and, when picked, its options and the answer in progress, in at most room lines
         if picked: lines = [c(KEY, "▸") + lines[0][1:]] + lines[1:]

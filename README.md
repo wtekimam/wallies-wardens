@@ -127,7 +127,7 @@ Press `d`, pick a card with `a` / `s`, then answer it:
 2. Press the option's number, or `e` to type any answer and `Enter` to end it. Any card can be answered this way: `decide`, `unblock` or `review`.
 3. The card shows the exact answer, `send › <answer>`, with `f send to Firstmate · Esc cancel`. Nothing is sent until you press `f`. `Esc` drops the answer.
 4. After `f` the card shows a receipt: `✓ sent to Firstmate (note <id>) · <answer>`, `✓ already sent …` for a repeat, or `✗` and what went wrong. A failed send is never retried; send it again yourself.
-   A decision that closes while its answer waits for `f` is not answered: `✗ not sent: it closed before f`.
+   A decision that closes while its answer waits for `f` is not answered: its answer is dropped and `✗ not sent: it closed before f` shows under the `needs you` heading.
 
 `f` runs the Firstmate home's own `bin/fm-inbox.sh note --request-id <id> --json -- <text>` (with `FM_HOME` set to that home), the same path as a note you write to Firstmate, so Firstmate reads it at its next check and decides what to do. Nothing happens on its own.
 The note stands alone: it names the project and task, the task's backlog title, which decision it answers (its `[key=…]` and when it was raised) with the decision's full text, and your answer, in its first line so Firstmate's summary of the note shows it.
