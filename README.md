@@ -147,7 +147,7 @@ Every 3 seconds, for each `state/<id>.meta` in the Firstmate home, it reads:
   A truncated file starts the trophies over.
 
 For each worker that isn't merged or partying it also asks Firstmate whether its no-mistakes review pipeline is the current step, by running the home's read-only `bin/fm-crew-state.sh <id>` (with `FM_HOME` set to the home, and `FM_CREW_STATE_NO_FORGE=1` so it skips its forge read).
-That takes about a second, so it runs on a background thread and the poll never waits for it: the answer is kept in memory for 15 seconds, then asked again while the old one still shows. A missing script, a non-zero exit, a run over 10 seconds, or an `unknown` answer counts as no answer, and the mood comes from the status line alone (see Rules).
+That takes about a second, so it runs on a background thread and the poll never waits for it (`--once` waits, to print a settled frame): the answer is kept in memory for 15 seconds, then asked again while the old one still shows. A missing script, a non-zero exit, a run over 10 seconds, any other error, or an `unknown` answer counts as no answer, and the mood comes from the status line alone (see Rules).
 
 For the main session it reads the `agent_status` of the Herdr pane whose cwd is the Firstmate home, from `herdr pane list` (once every 3 seconds, the same poll).
 
