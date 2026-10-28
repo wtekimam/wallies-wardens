@@ -1,5 +1,5 @@
 """python3 -m unittest test_pet  -- fixture Firstmate-style state dirs, no live home touched."""
-import datetime, json, os, re, subprocess, sys, tempfile, time, unittest, zlib
+import datetime, json, os, re, subprocess, sys, tempfile, threading, time, unittest, zlib
 from unittest import mock
 import pet
 
@@ -310,6 +310,116 @@ class Answers(unittest.TestCase):  # answering a needs-you card: subprocess.run 
     def test_keys_split_escape_sequences(self):
         self.assertEqual(pet.KEYS.findall("\x1b[A\x1bOBa\x1b"), ["\x1b[A", "\x1bOB", "a", "\x1b"])
         self.assertEqual(pet.KEYS.findall("ok é"), list("ok é"))
+
+class ReviewPipeline(unittest.TestCase):  # bin/fm-crew-state.sh is stubbed (subprocess.run's stand-in, or a fake script in the temp home); no real Firstmate script runs
+    RUNNING = "state: working · source: run-step · validating (running) · run: 01ABC"
+    FIXING = "state: working · source: run-step · validating (fixing) · run: 01ABC"
+    BACKGROUND = "state: working · source: run-step · validating (background run)"
+    PARKED = "state: parked · source: run-step · parked at review: 2 finding(s) · run: 01ABC"
+    PANE = "state: working · source: pane · harness busy (claude-hook)"
+
+    def setUp(self):
+        self.h = Home()
+        os.makedirs(os.path.join(self.h.root, "bin"))
+        self.script = os.path.join(self.h.root, "bin", "fm-crew-state.sh")
+        with open(self.script, "w") as f: f.write("#!/bin/sh\nexit 1\n")  # only its presence counts: run is stubbed below
+        os.chmod(self.script, 0o755)
+    def tearDown(self): self.h.tmp.cleanup()
+
+    def stub(self, out, code=0, calls=None):
+        def run(cmd, **kw):
+            if calls is not None: calls.append((cmd, kw["env"]["FM_HOME"], kw["env"].get("FM_CREW_STATE_NO_FORGE")))
+            if isinstance(out, Exception): raise out
+            return subprocess.CompletedProcess(cmd, code, out + "\n", "")
+        return run
+
+    def poll(self, out, code=0, lines=(f"working [at={NOW}]: building the thing",), active=NOW - 60, **kw):
+        self.h.worker("demo-task", lines=list(lines), active=active, **kw)
+        return pet.Pet(self.h.root, crew=pet.CrewState(self.h.root, self.stub(out, code), wait=True)).poll(NOW)[0]
+
+    def labels(self, w): return [pet.TAG.sub("", l).strip() for l in pet.cell(1, {**w, "acc": None})[6:]]
+
+    def test_running_reviews_and_never_sleeps(self):
+        w = self.poll(self.RUNNING, active=NOW - pet.ASLEEP_SECS - 600)  # a long quiet run: the status file has not moved
+        self.assertEqual((w["mood"], w["label"], w["sub"], w["bubble"], w["hn"]), ("training", "reviewing", "running", "", "no-mistakes"))
+        self.assertEqual(self.labels(w)[2:], ["reviewing · 10m", "●●●●● no-mistakes", "running"])
+        self.assertTrue(all(pet.vis(l) <= pet.CW for l in pet.cell(1, {**w, "acc": None})))
+
+    def test_fixing_and_background_run(self):
+        self.assertEqual(self.labels(self.poll(self.FIXING))[4], "fixing")
+        self.h.tmp.cleanup(); self.setUp()
+        self.assertEqual(self.labels(self.poll(self.BACKGROUND))[4], "background run")
+
+    def test_status_line_says_something_else(self):  # the latest line says done, but the pipeline is what runs now
+        w = self.poll(self.RUNNING, lines=[f"done [at={NOW}]: handing off to the pipeline"])
+        self.assertEqual((w["mood"], w["label"], w["bubble"]), ("training", "reviewing", ""))
+
+    def test_paused_for_a_decision_needs_a_call(self):
+        w = self.poll(self.PARKED, lines=[f"needs-decision [key=nm-1-review] [at={NOW}]: ask-user findings=f1"])
+        self.assertEqual((w["mood"], w["label"], w["bubble"], w["sub"]), ("training", "reviewing", "needs a call", ""))
+        self.assertEqual(self.labels(w)[4], '"needs a call"')
+        self.assertEqual(w["decision"]["kind"], "needs-decision")  # its needs-you card stays
+
+    def test_not_a_pipeline_step(self):
+        w = self.poll(self.PANE)
+        self.assertEqual((w["mood"], w["sub"], w.get("label")), ("busy", "building", None))
+        self.h.tmp.cleanup(); self.setUp()  # the text's guess of validation is answered by the script: no pipeline
+        w = self.poll(self.PANE, lines=[f"working [at={NOW}]: validation passed locally"])
+        self.assertEqual((w["mood"], w["sub"]), ("busy", "building"))
+        self.h.tmp.cleanup(); self.setUp()  # a finished run is not the current step
+        self.assertEqual(self.poll("state: done · source: run-step · checks green: PR ready for review", lines=[f"done [at={NOW}]: PR https://x/pull/1"])["bubble"], "PR ready!")
+
+    def test_failure_falls_back_to_the_status_line(self):
+        for out, code in (("", 1), (self.RUNNING, 2), (subprocess.TimeoutExpired("x", 10), 0), (OSError("gone"), 0), ("garbage", 0),
+                          ("state: unknown · source: none · worktree gone (torn down?)", 0)):
+            with self.subTest(out=out):
+                w = self.poll(out, code, lines=[f"working [at={NOW}]: running no-mistakes validation"])
+                self.assertEqual((w["mood"], w["sub"], w.get("label")), ("training", "validating", None))
+                self.assertEqual(self.poll(out, code)["mood"], "busy")
+
+    def test_missing_script_falls_back_without_running(self):
+        os.remove(self.script)
+        calls = []
+        self.h.worker("demo-task", lines=[f"working [at={NOW}]: running no-mistakes validation"])
+        w = pet.Pet(self.h.root, crew=pet.CrewState(self.h.root, self.stub(self.RUNNING, calls=calls), wait=True)).poll(NOW)[0]
+        self.assertEqual((w["mood"], w["sub"], calls), ("training", "validating", []))
+
+    def test_merged_and_main_are_not_asked(self):
+        calls = []
+        self.h.worker("demo-done", lines=[f"done [at={NOW}]: merged into main"])
+        pt = pet.Pet(self.h.root, lambda: [dict(cwd=self.h.root, agent_status="working", pane_id="p1")],
+                     pet.CrewState(self.h.root, self.stub(self.RUNNING, calls=calls), wait=True))
+        self.assertEqual([w["mood"] for w in pt.poll(NOW)], ["busy", "party"])
+        self.assertEqual(calls, [])
+
+    def test_cached_briefly_and_asked_in_the_background(self):
+        calls, gate = [], threading.Event()
+        def run(cmd, **kw):
+            gate.wait(5); calls.append((cmd, kw["env"]["FM_HOME"], kw["env"].get("FM_CREW_STATE_NO_FORGE")))
+            return subprocess.CompletedProcess(cmd, 0, self.RUNNING + "\n", "")
+        self.h.worker("demo-task", lines=[f"working [at={NOW}]: building"])
+        crew = pet.CrewState(self.h.root, run)
+        pt = pet.Pet(self.h.root, crew=crew)
+        self.assertEqual(pt.poll(NOW)[0]["mood"], "busy")  # the answer is not in yet: the poll did not wait for it
+        self.assertEqual(pt.poll(NOW + 1)[0]["mood"], "busy")  # still asking: no second call
+        gate.set()
+        for _ in range(500):
+            if crew.answers: break
+            time.sleep(0.01)
+        self.assertEqual(pt.poll(NOW + 2)[0]["label"], "reviewing")
+        self.assertEqual(pt.poll(NOW + pet.CREW_TTL - 1)[0]["label"], "reviewing")
+        self.assertEqual(calls, [([self.script, "demo-task"], self.h.root, "1")])  # one call, in the home, with no forge read
+        pt.poll(NOW + pet.CREW_TTL + 1)  # stale: asked again, the old answer still shows meanwhile
+        for _ in range(500):
+            if len(calls) == 2: break
+            time.sleep(0.01)
+        self.assertEqual(len(calls), 2)
+
+    def test_pipeline_step_lines(self):
+        self.assertEqual([pet.pipeline_step(l) for l in (self.RUNNING, self.FIXING, self.BACKGROUND, self.PARKED, self.PANE, None, "",
+                                                          "state: working · source: run-step · ci running · run: 01ABC",
+                                                          "state: failed · source: run-step · run failed")],
+                         ["running", "fixing", "background run", "needs a call", "", None, None, "ci", ""])
 
 class Title(unittest.TestCase):
     def setUp(self): self.h = Home()
