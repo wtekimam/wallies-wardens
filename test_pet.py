@@ -415,6 +415,21 @@ class ReviewPipeline(unittest.TestCase):  # bin/fm-crew-state.sh is stubbed (sub
             time.sleep(0.01)
         self.assertEqual(len(calls), 2)
 
+    def test_unexpected_error_is_no_answer_and_asked_again(self):
+        calls = []
+        def run(cmd, **kw):
+            calls.append(cmd)
+            if len(calls) == 1: raise ValueError("boom")
+            return subprocess.CompletedProcess(cmd, 0, self.RUNNING + "\n", "")
+        self.h.worker("demo-task", lines=[f"working [at={NOW}]: running no-mistakes validation"])
+        pt = pet.Pet(self.h.root, crew=pet.CrewState(self.h.root, run, wait=True))
+        w = pt.poll(NOW)[0]
+        self.assertEqual((w["mood"], w["sub"], w.get("label")), ("training", "validating", None))
+        self.assertEqual(pt.poll(NOW + pet.CREW_TTL - 1)[0].get("label"), None)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(pt.poll(NOW + pet.CREW_TTL + 1)[0]["label"], "reviewing")
+        self.assertEqual(len(calls), 2)
+
     def test_pipeline_step_lines(self):
         self.assertEqual([pet.pipeline_step(l) for l in (self.RUNNING, self.FIXING, self.BACKGROUND, self.PARKED, self.PANE, None, "",
                                                           "state: working · source: run-step · ci running · run: 01ABC",

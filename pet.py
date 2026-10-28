@@ -331,13 +331,15 @@ class CrewState:
 
     def ask(self, wid, now):
         import subprocess
+        line = None
         try:
-            r = (self.run or subprocess.run)([self.script, wid], capture_output=True, text=True, timeout=CREW_TIMEOUT,
+            r = (self.run or subprocess.run)([self.script, wid], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=CREW_TIMEOUT,
                                               env={**os.environ, "FM_HOME": self.home, "FM_CREW_STATE_NO_FORGE": "1"})  # no forge read: Wardens makes no network calls
             out = (r.stdout or "").strip().splitlines()
             line = out[-1] if r.returncode == 0 and out else None
-        except (OSError, subprocess.SubprocessError): line = None
-        with self.lock: self.answers[wid] = (line, now); self.asking.discard(wid)
+        except Exception: pass
+        finally:
+            with self.lock: self.answers[wid] = (line, now); self.asking.discard(wid)
 
     def forget(self, live):  # drop the answers of workers no longer shown
         with self.lock: self.answers = {k: v for k, v in self.answers.items() if k in live}
