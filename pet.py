@@ -9,7 +9,8 @@ its title and hold come from data/backlog.md, its report is data/<id>/report.md 
 Trophies and the captain's log (one entry a day, from templates) come from state/fleet-ledger.jsonl (read by byte offset, only new lines each poll).
 Every PR shown is an OSC 8 hyperlink to its URL; Herdr opens it on Ctrl-click.
 It never writes under the Firstmate home itself. Its one write: in the needs-you view the captain can answer a card, and after a confirming key
-that answer goes to the captain's inbox through the home's own `bin/fm-inbox.sh note`, the same path as a note to Firstmate; no other Firstmate script runs.
+that answer goes to the captain's inbox through the home's own `bin/fm-inbox.sh note`, the same path as a note to Firstmate.
+The one other Firstmate script it runs is the read-only `bin/fm-crew-state.sh <id>`, in the background, to tell a worker whose no-mistakes review pipeline is its current step.
 
   python3 pet.py            live pane: read status every 3s, animate about twice a second, redraw only changed lines
   python3 pet.py --once     print one frame to stdout and exit (--once --strip: the strip's frame)
@@ -17,7 +18,7 @@ that answer goes to the captain's inbox through the home's own `bin/fm-inbox.sh 
 
 PET_ANIMATE=0 (environment, or a line in the plugin config file) keeps the Mochis still.
 """
-import datetime, functools, hashlib, json, math, os, re, sys, time, unicodedata, zlib
+import datetime, functools, hashlib, json, math, os, re, sys, threading, time, unicodedata, zlib
 
 POLL = 3                 # seconds between polls
 ASLEEP_SECS = 30 * 60    # no status or turn activity this long (and not calling) -> asleep
@@ -25,6 +26,8 @@ HUNGER_STEP = 10 * 60    # one heart lost per this long spent calling without a 
 PARTY_SECS = 30          # how long a worker parties after a merge record for it arrives
 ANIM = 0.5               # seconds between animation frames (status files are still read every POLL)
 SHOWN = 8                # creatures on screen; the rest become "+N more"
+CREW_TTL = 15            # seconds a crew-state answer is used before it is asked again
+CREW_TIMEOUT = 10        # seconds one bin/fm-crew-state.sh may take before it counts as failed
 DEFAULT_HOME = os.path.expanduser("~/Documents/firstmate")
 
 # ---- tiny markup: {#rrggbb} fg, {@rrggbb} bg, {b} bold, {v} reverse, {/} reset (lifted from the design build.py); {>url} opens a link, {>} closes it ----
@@ -285,6 +288,62 @@ def read_worker(state_dir, wid, now):
                 age=age(now - born), hunger=hunger, hn=hn, ws=meta.get("herdr_workspace_id"), tab=meta.get("herdr_tab_id"),
                 pane=meta.get("herdr_pane_id"), decision=dec, held=held)
 
+CREW = re.compile(r"state: (\S+) · source: (\S+)(?: · (.*))?")
+STEP = re.compile(r"validating \(([^)]+)\)")
+
+def pipeline_step(line):
+    """-> what a `bin/fm-crew-state.sh` line says of the review pipeline: None when it says nothing (no line, failed, unknown), "" when the pipeline
+    is not the current step, else its step: running, fixing, background run, ci, or "needs a call" while the run is parked at a gate."""
+    m = CREW.fullmatch((line or "").strip())
+    if not m or m[1] == "unknown": return None
+    if m[2] != "run-step": return ""
+    if m[1] == "parked": return "needs a call"
+    if m[1] != "working": return ""  # a finished run: done or failed is no longer the current step
+    s = STEP.search(m[3] or "")
+    return s[1] if s else "ci" if (m[3] or "").startswith("ci ") else "running"
+
+def review(w, line):  # a worker's crew-state answer over its text-based mood: while the pipeline is its current step, the training Mochi, reviewing, never asleep
+    step = pipeline_step(line)
+    if step is None: return w  # no answer: keep the status line's guess
+    if step: w.update(mood="training", label="reviewing", bubble="needs a call" if step == "needs a call" else "",
+                      sub="" if step == "needs a call" else step, hunger=5, hn="no-mistakes")
+    elif w["mood"] == "training": w.update(mood="busy", sub="investigating" if w["kind"] == "scout" else "building")  # the text's guess, answered: no pipeline
+    return w
+
+class CrewState:
+    """Firstmate's own read of a worker's current state: the home's `bin/fm-crew-state.sh <id>` (read-only, about a second each).
+    Answers are kept in memory CREW_TTL seconds; an older one is asked again on a background thread, so a poll never waits on it.
+    wait (--once): ask inline instead. A missing script, a failure or a timeout is no answer, and the status line's guess stands."""
+    def __init__(self, home, run=None, wait=False):  # run: subprocess.run's stand-in for tests
+        self.home, self.run, self.wait = home, run, wait
+        self.script = os.path.join(home, "bin", "fm-crew-state.sh")
+        self.answers, self.asking, self.lock = {}, set(), threading.Lock()  # answers: id -> (line or None, when it was asked)
+
+    def __call__(self, wid, now):  # -> the newest answer for wid, or None
+        with self.lock:
+            line, at = self.answers.get(wid, (None, None))
+            if (at is not None and now - at < CREW_TTL) or wid in self.asking or not os.access(self.script, os.X_OK): return line
+            self.asking.add(wid)
+        if not self.wait:
+            threading.Thread(target=self.ask, args=(wid, now), daemon=True).start(); return line
+        self.ask(wid, now)
+        return self.answers[wid][0]
+
+    def ask(self, wid, now):
+        import subprocess
+        line = None
+        try:
+            r = (self.run or subprocess.run)([self.script, wid], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=CREW_TIMEOUT,
+                                              env={**os.environ, "FM_HOME": self.home, "FM_CREW_STATE_NO_FORGE": "1"})  # no forge read: Wardens makes no network calls
+            out = (r.stdout or "").strip().splitlines()
+            line = out[-1] if r.returncode == 0 and out else None
+        except Exception: pass
+        finally:
+            with self.lock: self.answers[wid] = (line, now); self.asking.discard(wid)
+
+    def forget(self, live):  # drop the answers of workers no longer shown
+        with self.lock: self.answers = {k: v for k, v in self.answers.items() if k in live}
+
 def age(secs):
     m = int(secs // 60)
     return f"{m}m" if m < 60 else f"{m // 60}h {m % 60}m" if m < 1440 else f"{m // 1440}d {m % 1440 // 60}h"
@@ -411,8 +470,8 @@ def captains_log(ledger, now):  # -> [(date, [markup word, ...])], newest day fi
 
 # ---- the pet: keeps accessories stable, parties workers whose merge just got recorded, lists today's trophies ----
 class Pet:
-    def __init__(self, home, list_panes=None):  # list_panes() -> Herdr's pane list; None (no Herdr) means no main Mochi
-        self.home, self.list_panes = home, list_panes
+    def __init__(self, home, list_panes=None, crew=None):  # list_panes() -> Herdr's pane list; None (no Herdr) means no main Mochi; crew(id, now) -> a crew-state line or None
+        self.home, self.list_panes, self.crew = home, list_panes, crew
         self.state = os.path.join(home, "state")
         self.ledger = Ledger(self.state)
         self.accs, self.party, self.trophies, self.log, self.logged, self.primed, self.week, self.landed = {}, {}, [], [], None, False, True, 0
@@ -437,8 +496,10 @@ class Pet:
             if self.primed and m["task"] in live: self.party[m["task"]] = now + PARTY_SECS
         self.primed = True
         self.party = {k: t for k, t in self.party.items() if t > now and k in live}
+        if self.crew: self.crew.forget(live)
         for w in workers:
             if w["id"] in self.party: w.update(mood="party", bubble="", sub="merged!", hunger=5, hn="fed")
+            elif self.crew and w["mood"] != "party": review(w, self.crew(w["id"], now))
         self.trophies = trophies_today(self.ledger.merged, now, self.week)
         self.landed = len(self.trophies if not self.week else trophies_today(self.ledger.merged, now))  # the title's "N landed today", whichever span the trophies show
         if self.logged != (self.ledger.off, datetime.date.fromtimestamp(now)):  # rebuilt only when the ledger grows or the day turns
@@ -484,7 +545,7 @@ def cell(i, w, tick=None):  # tick None: the still frame
     f = 0 if tick is None else ((tick // 2 if w["mood"] == "asleep" else tick) + i) % 2  # neighbours out of step; asleep at half speed
     body = creature(w["mood"], w.get("acc"), w.get("colour", colour_of(w["project"])), f)
     mid = lambda x: center(x, CW - 1) + " "  # the sprite and its labels share one centre line; the last column stays free between cells
-    return [mid(x) for x in body] + [mid(proj), mid(task), mid(c(MC[w["mood"]], w["mood"]) + c(DIM, f" · {w['age']}")),
+    return [mid(x) for x in body] + [mid(proj), mid(task), mid(c(MC[w["mood"]], w.get("label", w["mood"])) + c(DIM, f" · {w['age']}")),
             mid(c(DIM, w["hn"]) if w["hunger"] is None else hearts(w["hunger"]) + c(DIM, " " + clip(hunger_note(w["hn"]), CW - 7))), mid(last)]
 
 def hunger_note(hn): return hn if len(hn) <= CW - 7 else hn.replace("waiting ", "")  # "waiting 4d 13h" outgrows the cell beside five hearts: the hearts already say it waits
@@ -939,7 +1000,8 @@ def live(pet):
 def main(argv):
     if "--pin" in argv: return pin(os.environ.get("HERDR_BIN_PATH", "herdr"), fm_home())
     herdr = os.environ.get("HERDR_BIN_PATH", "herdr")  # ponytail: one `pane list` per poll (every POLL s); a missing herdr just means no main Mochi
-    pet = Pet(fm_home(), lambda: herdr_call(herdr, "pane", "list")["panes"])
+    home = fm_home()
+    pet = Pet(home, lambda: herdr_call(herdr, "pane", "list")["panes"], CrewState(home, wait="--once" in argv))
     if "--once" in argv:
         lay = render_strip if "--strip" in argv else render
         ws = pet.poll(time.time())

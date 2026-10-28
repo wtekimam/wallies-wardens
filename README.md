@@ -146,9 +146,12 @@ Every 3 seconds, for each `state/<id>.meta` in the Firstmate home, it reads:
   A missing file, blank or malformed lines, and unknown events or members are ignored.
   A truncated file starts the trophies over.
 
+For each worker that isn't merged or partying it also asks Firstmate whether its no-mistakes review pipeline is the current step, by running the home's read-only `bin/fm-crew-state.sh <id>` (with `FM_HOME` set to the home, and `FM_CREW_STATE_NO_FORGE=1` so it skips its forge read).
+That takes about a second, so it runs on a background thread and the poll never waits for it (`--once` waits, to print a settled frame): the answer is kept in memory for 15 seconds, then asked again while the old one still shows. A missing script, a non-zero exit, a run over 10 seconds, any other error, or an `unknown` answer counts as no answer, and the mood comes from the status line alone (see Rules).
+
 For the main session it reads the `agent_status` of the Herdr pane whose cwd is the Firstmate home, from `herdr pane list` (once every 3 seconds, the same poll).
 
-It never reads pane contents and never writes under the Firstmate home itself. The one Firstmate script it runs is `bin/fm-inbox.sh note`, only when you press `f` on an answer (see Answering); that script saves the note in the home's inbox. It runs no other `bin/fm-*`.
+It never reads pane contents and never writes under the Firstmate home itself. It runs two Firstmate scripts: the read-only `bin/fm-crew-state.sh <id>` above, and `bin/fm-inbox.sh note`, only when you press `f` on an answer (see Answering); that script saves the note in the home's inbox. It runs no other `bin/fm-*`.
 Only `--pin`, the pinned strip and the poll's `pane list` call Herdr.
 `--pin` calls `pane list`, `workspace list`, `pane process-info`, `plugin pane open`, `pane swap`, and `pane close` for a restored shell.
 To put focus back it calls `workspace focus`, `tab focus`, `pane neighbor` or `pane focus`.
@@ -159,14 +162,16 @@ Status files are read every 3 seconds whether or not the Mochis animate. Between
 ## Rules
 
 **Mood** comes from the last status event. `resolved` closes an open `needs-decision` or `blocked`, and the worker goes back to busy.
+A running review pipeline outranks it: while `bin/fm-crew-state.sh` reports the no-mistakes run as the current step, the worker is reviewing, even if its last line is `done` or a decision (that decision's needs-you card still shows). When the script answers that the pipeline is not the current step, a status line that only mentions validation stays busy.
 
 | mood | when | text under the label |
 |---|---|---|
 | busy | `working` / `paused` | building, or investigating for a scout |
-| training | `working` / `paused` line mentions no-mistakes or validation | validating |
+| training, labelled `reviewing` | `bin/fm-crew-state.sh` says the no-mistakes run is the current step (`source: run-step`), whatever the status line says; never asleep | `no-mistakes` beside the hearts, then `running`, `fixing`, `background run` or `ci`; `"needs a call"` while the run is parked at a gate |
+| training | with no answer from `bin/fm-crew-state.sh` (see What it reads): a `working` / `paused` line mentions no-mistakes or validation | validating |
 | calling | `needs-decision`, or `done` | `"your call!"`, `"PR ready!"`, `"report ready!"` (scout) |
 | sick | `blocked` / `failed` | blocked / failed |
-| asleep | busy or training with no status or turn activity for 30 min | silent 45m |
+| asleep | busy or training (not reviewing) with no status or turn activity for 30 min | silent 45m |
 | party | `done` line says merged/landed, or a merge record for it arrives in the ledger (30 s) | merged! |
 
 **Main session:** one extra Mochi, always first, labelled `1 main` over `firstmate`. It shows only while Herdr has a pane whose cwd is the Firstmate home; with none (or without Herdr, or `--once` outside it) there is no main Mochi and no error. It counts toward the eight.
